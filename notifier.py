@@ -57,56 +57,72 @@ def _direction_emoji(direction: str) -> str:
     return "📈" if direction.upper() == "LONG" else "📉"
 
 
+def _calc_levels(price: float, direction: str) -> tuple:
+    """Calculate entry, stop-loss and take-profit levels."""
+    if direction == "LONG":
+        entry = price
+        sl    = round(price * 0.97, 6)   # -3%
+        tp1   = round(price * 1.03, 6)   # +3%
+        tp2   = round(price * 1.06, 6)   # +6%
+    else:
+        entry = price
+        sl    = round(price * 1.03, 6)   # +3%
+        tp1   = round(price * 0.97, 6)   # -3%
+        tp2   = round(price * 0.94, 6)   # -6%
+    return entry, sl, tp1, tp2
+
+
 def _build_reason_bullets(
     signal:      RankedSignal,
     news_ctx:    Optional[NewsContext],
     sector:      str,
 ) -> List[str]:
-    """Build the 4 mandatory reason bullets."""
+    """Build simple, beginner-friendly reason bullets."""
     comp = signal.components
 
-    # 1. Strength (RS + ADX)
+    # 1. Market direction (RS + ADX in plain language)
     rs_score  = comp.get("relative_strength", 0)
     adx_score = comp.get("adx_regime", 0)
-    strength_label = (
-        "Strong RS vs BTC + trending" if rs_score >= 70 and adx_score >= 70
-        else "Outperforming BTC" if rs_score >= 65
-        else "Trending regime" if adx_score >= 65
-        else "Moderate strength"
-    )
-    strength_line = f"Strength: {strength_label} (RS={rs_score:.0f} ADX={adx_score:.0f})"
+    if rs_score >= 70 and adx_score >= 70:
+        strength_line = "📊 Tendência forte e superando o BTC"
+    elif rs_score >= 65:
+        strength_line = "📊 Moeda mais forte que o BTC agora"
+    elif adx_score >= 65:
+        strength_line = "📊 Tendência clara no gráfico"
+    else:
+        strength_line = "📊 Movimento moderado, sem tendência forte"
 
-    # 2. OI
+    # 2. OI in plain language
     oi_score = comp.get("oi_acceleration", 0)
-    oi_label = (
-        "OI surging — strong conviction" if oi_score >= 85
-        else "OI building steadily"      if oi_score >= 65
-        else "OI neutral"                if oi_score >= 45
-        else "OI declining — caution"
-    )
-    oi_line = f"OI: {oi_label} (score={oi_score:.0f})"
+    if oi_score >= 85:
+        oi_line = "💰 Muito dinheiro entrando no mercado agora"
+    elif oi_score >= 65:
+        oi_line = "💰 Interesse crescente de traders"
+    elif oi_score >= 45:
+        oi_line = "💰 Volume de contratos estável"
+    else:
+        oi_line = "⚠️ Interesse dos traders caindo"
 
-    # 3. News
+    # 3. News in plain language
     if news_ctx and news_ctx.articles:
         sentiment_emoji = "🟢" if news_ctx.aggregate_sentiment == "positive" else (
                           "🔴" if news_ctx.aggregate_sentiment == "negative" else "⚪")
-        freshness = f"{news_ctx.freshness_minutes:.0f}m ago"
-        headline  = news_ctx.top_headline[:80] + ("…" if len(news_ctx.top_headline) > 80 else "")
-        news_line = f"News {sentiment_emoji}: {headline} ({freshness})"
+        headline = news_ctx.top_headline[:80] + ("…" if len(news_ctx.top_headline) > 80 else "")
+        news_line = f"📰 Notícia {sentiment_emoji}: {headline}"
     else:
-        news_line = "News: No significant recent news"
+        news_line = "📰 Sem notícias relevantes no momento"
 
-    # 4. Freshness / sector
+    # 4. Entry timing in plain language
     bb_score  = comp.get("bb_squeeze", 0)
     atr_score = comp.get("atr_quality", 0)
-    fresh_label = (
-        "Early entry — BB squeeze + ATR optimal" if bb_score >= 75 and atr_score >= 75
-        else "Early-stage setup"                  if bb_score >= 60
-        else "Acceptable entry window"
-    )
-    freshness_line = f"Entry: {fresh_label} | Sector: {sector}"
+    if bb_score >= 75 and atr_score >= 75:
+        entry_line = "⏱ Entrada no início do movimento — ótimo timing"
+    elif bb_score >= 60:
+        entry_line = "⏱ Bom momento para entrar"
+    else:
+        entry_line = "⏱ Movimento já iniciado — entre com cautela"
 
-    return [strength_line, oi_line, news_line, freshness_line]
+    return [strength_line, oi_line, news_line, entry_line]
 
 
 def _build_alert_message(
@@ -114,11 +130,11 @@ def _build_alert_message(
     news_map:    Dict[str, Optional[NewsContext]],
 ) -> str:
     """
-    Build the full Telegram message for up to 3 signals.
+    Build beginner-friendly Telegram alert with entry, stop and targets.
     """
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
     lines   = [
-        "🚨 *TOP 3 TRADE OPPORTUNITIES*",
+        "🚨 *SINAL DE TRADE DETECTADO*",
         f"_{now_str}_",
         "",
     ]
@@ -131,21 +147,54 @@ def _build_alert_message(
         sector    = get_sector_label(sym)
         news_ctx  = news_map.get(sym)
 
-        reasons   = _build_reason_bullets(sig, news_ctx, sector)
-        dir_emoji = _direction_emoji(direction)
-        band_emoji= _band_emoji(band)
+        # Get live price
+        try:
+            from websocket_client import ws_price_cache
+            price = ws_price_cache.get(sym, 0.0)
+        except Exception:
+            price = 0.0
 
-        lines.append(
-            f"*{sig.rank}. {sym}* — {dir_emoji} *{direction}* — "
-            f"Score: `{score:.1f}` {band_emoji} [{band}]"
-        )
-        lines.append("Reason:")
+        dir_emoji  = _direction_emoji(direction)
+        band_emoji = _band_emoji(band)
+        conviction = "🔥 ALTA CONVICÇÃO" if band == "HIGH_CONVICTION" else "✅ VÁLIDO"
+
+        # Header
+        lines.append(f"{'━'*22}")
+        lines.append(f"{dir_emoji} *{sym}/USDT* — *{direction}*")
+        lines.append(f"Força do sinal: `{score:.0f}/100` {band_emoji} {conviction}")
+        lines.append("")
+
+        # Entry levels
+        if price > 0:
+            entry, sl, tp1, tp2 = _calc_levels(price, direction)
+            sl_pct  = abs(price - sl)  / price * 100
+            tp1_pct = abs(tp1 - price) / price * 100
+            tp2_pct = abs(tp2 - price) / price * 100
+
+            lines.append("*📌 COMO OPERAR:*")
+            lines.append(f"• Entrada:  `${entry:,.4f}`")
+            lines.append(f"• Stop Loss: `${sl:,.4f}` ({sl_pct:.1f}% de risco)")
+            lines.append(f"• Alvo 1:   `${tp1:,.4f}` (+{tp1_pct:.1f}%)")
+            lines.append(f"• Alvo 2:   `${tp2:,.4f}` (+{tp2_pct:.1f}%)")
+            lines.append(f"• Setor: {sector}")
+            lines.append("")
+
+        # Reasons in plain language
+        reasons = _build_reason_bullets(sig, news_ctx, sector)
+        lines.append("*🧠 POR QUE ESTE SINAL?*")
         for r in reasons:
             lines.append(f"• {r}")
         lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("_Powered by Phase 3 Scanner_")
+        # Risk warning
+        lines.append("*⚠️ GESTÃO DE RISCO:*")
+        lines.append("• Nunca arrisque mais de 1-2% do seu capital")
+        lines.append("• Respeite sempre o Stop Loss")
+        lines.append("• Este é um sinal, não uma garantia")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("_Jarvis AI Trading Monitor_")
     return "\n".join(lines)
 
 

@@ -114,6 +114,7 @@ def build_scheduler(
     performance_fn:    Callable,
     adaptive_fn:       Callable,
     market_report_fn:  Callable = None,
+    macro_refresh_fn:  Callable = None,
     btc_spike_fn:      Callable = None,
     daily_summary_fn:  Callable = None,
 ) -> AppScheduler:
@@ -138,6 +139,10 @@ def build_scheduler(
 
     # Performance checks: 1 hour
     sched.add_interval_job(performance_fn, minutes=0,  name="perf_checks",     hours=1,  jitter=60)
+
+    # Macro intelligence refresh: 30 min
+    if macro_refresh_fn:
+        sched.add_interval_job(macro_refresh_fn, minutes=30, name="macro_refresh", jitter=60)
 
     # Market report: 1 hour
     if market_report_fn:

@@ -22,6 +22,8 @@ from typing import Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from adaptive import AdaptiveEngine
+from macro_intelligence import MacroEngine
+from memory_engine import MemoryEngine
 from btc_regime import RegimeResult
 from config import config
 from database import init_db, close_db, write_system_event
@@ -51,6 +53,8 @@ class AppContext:
         self.notifier:             Optional[Notifier]   = None
         self.tracker:              PerformanceTracker   = PerformanceTracker()
         self.adaptive:             AdaptiveEngine       = AdaptiveEngine()
+        self.macro:                MacroEngine          = MacroEngine()
+        self.memory:               MemoryEngine         = MemoryEngine()
 
         # Live data caches (populated by WS + scan loops)
         self.latest_articles:      List[NewsArticle]    = []
@@ -151,8 +155,11 @@ async def job_scan_cycle() -> None:
                     symbol=sig.symbol, score=sig.result.total,
                 )
 
+    # Get macro snapshot and memory insights
+    macro_snap = ctx.macro.get_snapshot()
+
     # Dispatch alerts
-    await ctx.notifier.dispatch(ranking, news_map)
+    await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)
 
     # Register sent alerts for performance tracking
     for sig in ranking.top:
@@ -172,6 +179,21 @@ async def job_scan_cycle() -> None:
 async def job_performance_checks() -> None:
     """Check alert outcomes every hour."""
     await ctx.tracker.run_checks()
+
+
+async def job_macro_refresh() -> None:
+    """Refresh macro data every 30 min."""
+    await ctx.macro.refresh()
+    # Check for high-impact macro events and alert
+    snap = ctx.macro.get_snapshot()
+    if snap:
+        high_neg = [e for e in snap.events if e.impact == 'HIGH' and e.sentiment == 'negative']
+        if high_neg:
+            await ctx.notifier.send_system_alert(
+                f'\U0001f534 *ALERTA MACRO*\n'
+                f'Evento de alto impacto detectado:\n'
+                f'• {high_neg[0].title[:100]}'
+            )
 
 
 async def job_market_report() -> None:
@@ -265,6 +287,8 @@ async def main() -> None:
 
     # ── 3. Adaptive engine ───────────────────────────────────────────────
     await ctx.adaptive.startup()
+    await ctx.memory.startup()
+    await ctx.macro.refresh()
 
     # ── 4. News engine (warm cache) ──────────────────────────────────────
     try:
@@ -300,6 +324,7 @@ async def main() -> None:
         performance_fn= job_performance_checks,
         adaptive_fn=    job_adaptive_tune,
         market_report_fn= job_market_report,
+        macro_refresh_fn= job_macro_refresh,
         btc_spike_fn=   job_btc_spike,
         daily_summary_fn= job_daily_summary,
     )

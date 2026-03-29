@@ -97,8 +97,10 @@ def _sentiment_pt(sentiment: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_signal_message(
-    signals:  List[RankedSignal],
-    news_map: Dict[str, Optional[NewsContext]],
+    signals:    List[RankedSignal],
+    news_map:   Dict[str, Optional[NewsContext]],
+    macro_snap  = None,
+    memory      = None,
 ) -> str:
     lines = [
         "🚨 *SINAL DE TRADE DETECTADO*",
@@ -189,6 +191,32 @@ def _build_signal_message(
             lines.append("• 📰 Adicione CRYPTOPANIC_TOKEN para notícias em tempo real")
 
         lines.append("")
+        # Macro context block
+        if macro_snap:
+            bias_emoji = "🟢" if macro_snap.crypto_bias == "BULLISH" else ("🔴" if macro_snap.crypto_bias == "BEARISH" else "⚪")
+            lines.append(f"*🌍 CONTEXTO MACRO:*")
+            lines.append(f"• Risco de mercado: {macro_snap.risk_label}")
+            lines.append(f"• Viés macro: {bias_emoji} {macro_snap.crypto_bias}")
+            if macro_snap.explanation:
+                lines.append(f"• {macro_snap.explanation[0]}")
+            if macro_snap.risk_score > 70:
+                lines.append("• ⚠️ Risco macro alto — reduza o tamanho da posição")
+            lines.append("")
+
+        # Memory/learning insight block
+        if memory:
+            from sector_rotation import classify_symbol
+            regime_str = "TRENDING"
+            sector_str = classify_symbol(sym)
+            insight = memory.get_insight(direction, score, regime_str, sector_str, macro_snap.risk_score if macro_snap else 50)
+            if insight.explanation:
+                lines.append("*🧠 O QUE O AGENTE APRENDEU:*")
+                for exp in insight.explanation[:3]:
+                    lines.append(f"• {exp}")
+                if insight.ignore_signal:
+                    lines.append("• ⛔ ATENÇÃO: Agente sugere cautela neste padrão")
+                lines.append("")
+
         lines.append("*⚠️ GESTÃO DE RISCO:*")
         lines.append("• Arrisque no máximo 1–2% do capital por operação")
         lines.append("• Respeite o Stop Loss — ele protege sua conta")
@@ -469,8 +497,10 @@ class Notifier:
 
     async def dispatch(
         self,
-        ranking:   RankingResult,
-        news_map:  Dict[str, Optional[NewsContext]],
+        ranking:    RankingResult,
+        news_map:   Dict[str, Optional[NewsContext]],
+        macro_snap  = None,
+        memory      = None,
     ) -> None:
         if not ranking.top:
             log.info("ALERT_SUPPRESSED", "no valid signals to dispatch")
@@ -494,7 +524,7 @@ class Notifier:
             log.info("ALERT_SUPPRESSED", "all signals suppressed by dedup")
             return
 
-        message = _build_signal_message(eligible, news_map)
+        message = _build_signal_message(eligible, news_map, macro_snap=macro_snap, memory=memory)
         sent    = await _send_telegram(self._token, self._chat_id, message)
 
         if sent:

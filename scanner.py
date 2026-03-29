@@ -57,6 +57,7 @@ def get_symbols() -> List[str]:
 # ---------------------------------------------------------------------------
 
 _oi_history: Dict[str, List[float]] = {}   # symbol → last 5 OI values
+_meta_cache: Dict[str, 'AssetMeta'] = {}    # symbol → latest AssetMeta (price, funding, OI)
 _snapshot_ts: Dict[str, float] = {}        # symbol → last snapshot unix ts
 
 
@@ -222,6 +223,9 @@ async def run_scan_cycle(
             sym: (v if isinstance(v, float) else 0.0)
             for sym, v in zip(vol_tasks.keys(), vol_results)
         }
+
+    # Update global meta cache for price lookups by notifier
+    _meta_cache.update(meta_map)
 
     # Per-symbol scan concurrently
     scan_tasks = []

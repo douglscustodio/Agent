@@ -47,11 +47,23 @@ def _now_br() -> str:
 
 
 def _get_price(symbol: str) -> float:
+    """Get price from WS cache. Falls back to Hyperliquid meta cache."""
     try:
         from websocket_client import ws_price_cache
-        return ws_price_cache.get(symbol, 0.0)
+        price = ws_price_cache.get(symbol, 0.0)
+        if price > 0:
+            return price
     except Exception:
-        return 0.0
+        pass
+    # Fallback: try meta cache populated by scanner
+    try:
+        from scanner import _meta_cache
+        meta = _meta_cache.get(symbol)
+        if meta and meta.mark_price > 0:
+            return meta.mark_price
+    except Exception:
+        pass
+    return 0.0
 
 
 def _calc_levels(price: float, direction: str) -> Tuple[float, float, float, float]:
@@ -168,10 +180,13 @@ def _build_signal_message(
             lines.append("• ⏱ Movimento já iniciado — entre com cautela")
 
         # News
-        if news_ctx and news_ctx.articles:
+        if news_ctx and news_ctx.articles and news_ctx.top_headline != "No recent news":
             lines.append(f"• 📰 Notícia ({_sentiment_pt(news_ctx.aggregate_sentiment)}): {news_ctx.top_headline[:80]}")
+            if news_ctx.freshness_minutes < 999:
+                lines[-1] += f" ({news_ctx.freshness_minutes:.0f}min atrás)"
         else:
-            lines.append("• 📰 Sem notícias relevantes no momento")
+            # Try to get any recent general news
+            lines.append("• 📰 Adicione CRYPTOPANIC_TOKEN para notícias em tempo real")
 
         lines.append("")
         lines.append("*⚠️ GESTÃO DE RISCO:*")

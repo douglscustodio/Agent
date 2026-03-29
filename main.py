@@ -174,6 +174,21 @@ async def job_performance_checks() -> None:
     await ctx.tracker.run_checks()
 
 
+async def job_market_report() -> None:
+    """Send hourly market report to Telegram."""
+    await ctx.notifier.send_market_report()
+
+
+async def job_btc_spike() -> None:
+    """Check BTC for sudden moves every 5 min."""
+    await ctx.notifier.check_btc_spike()
+
+
+async def job_daily_summary() -> None:
+    """Send daily summary at midnight UTC."""
+    await ctx.notifier.send_daily_summary(tracker=ctx.tracker)
+
+
 async def job_adaptive_tune() -> None:
     """Re-tune scoring weights every 24 hours."""
     await ctx.adaptive.adapt(ctx.tracker)
@@ -265,6 +280,7 @@ async def main() -> None:
     log.info("SYSTEM_START", f"Telegram config — token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
     ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
     await ctx.notifier.startup()
+    ctx.notifier.set_news_engine(ctx.news_engine)
     await ctx.notifier.send_system_alert(
         "🟢 *Crypto Monitor online*\nAll subsystems initialised. Scanner active."
     )
@@ -283,6 +299,9 @@ async def main() -> None:
         regime_fn=      job_btc_regime,
         performance_fn= job_performance_checks,
         adaptive_fn=    job_adaptive_tune,
+        market_report_fn= job_market_report,
+        btc_spike_fn=   job_btc_spike,
+        daily_summary_fn= job_daily_summary,
     )
     sched.start()
 

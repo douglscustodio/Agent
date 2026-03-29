@@ -108,11 +108,14 @@ class AppScheduler:
 # ---------------------------------------------------------------------------
 
 def build_scheduler(
-    scan_fn:          Callable,
-    news_fn:          Callable,
-    regime_fn:        Callable,
-    performance_fn:   Callable,
-    adaptive_fn:      Callable,
+    scan_fn:           Callable,
+    news_fn:           Callable,
+    regime_fn:         Callable,
+    performance_fn:    Callable,
+    adaptive_fn:       Callable,
+    market_report_fn:  Callable = None,
+    btc_spike_fn:      Callable = None,
+    daily_summary_fn:  Callable = None,
 ) -> AppScheduler:
     """
     Wire all application jobs into the scheduler.
@@ -121,18 +124,30 @@ def build_scheduler(
     sched = AppScheduler()
 
     # BTC regime refresh: 2 min
-    sched.add_interval_job(regime_fn,      minutes=2,  name="btc_regime",    jitter=5)
+    sched.add_interval_job(regime_fn,      minutes=2,  name="btc_regime",      jitter=5)
 
     # News fetch: 3 min
-    sched.add_interval_job(news_fn,        minutes=3,  name="news_fetch",    jitter=15)
+    sched.add_interval_job(news_fn,        minutes=3,  name="news_fetch",      jitter=15)
 
     # Full scan + ranking: 5 min
-    sched.add_interval_job(scan_fn,        minutes=5,  name="scan_cycle",    jitter=20)
+    sched.add_interval_job(scan_fn,        minutes=5,  name="scan_cycle",      jitter=20)
+
+    # BTC spike check: 5 min
+    if btc_spike_fn:
+        sched.add_interval_job(btc_spike_fn, minutes=5, name="btc_spike",      jitter=10)
 
     # Performance checks: 1 hour
-    sched.add_interval_job(performance_fn, minutes=0,  name="perf_checks",   hours=1,  jitter=60)
+    sched.add_interval_job(performance_fn, minutes=0,  name="perf_checks",     hours=1,  jitter=60)
+
+    # Market report: 1 hour
+    if market_report_fn:
+        sched.add_interval_job(market_report_fn, minutes=0, name="market_report", hours=1, jitter=120)
+
+    # Daily summary: 24 hours
+    if daily_summary_fn:
+        sched.add_interval_job(daily_summary_fn, minutes=0, name="daily_summary", hours=24, jitter=300)
 
     # Adaptive weight update: 24 hours
-    sched.add_interval_job(adaptive_fn,    minutes=0,  name="adaptive_tune", hours=24, jitter=300)
+    sched.add_interval_job(adaptive_fn,    minutes=0,  name="adaptive_tune",   hours=24, jitter=600)
 
     return sched

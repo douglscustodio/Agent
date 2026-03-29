@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from adaptive import AdaptiveEngine
-from btc_regime import compute_adx, RegimeResult, Regime
+from btc_regime import RegimeResult
 from config import config
 from database import init_db, close_db, write_system_event
 from health_server import run_health_server, app_state
@@ -31,7 +31,7 @@ from news_engine import NewsEngine, NewsArticle, NewsContext
 from notifier import Notifier
 from performance_tracker import PerformanceTracker
 from ranking import RankingResult
-from scanner import run_scan_cycle, MarketSnapshot
+from scanner import run_scan_cycle, get_symbols
 from scheduler import build_scheduler
 from sector_rotation import compute_sector_rotation
 from websocket_client import run_websocket_client, ws_state
@@ -77,15 +77,20 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 async def job_btc_regime() -> None:
-    """Refresh BTC regime every 2 min."""
-    if len(ctx.btc_closes) < 30:
-        log.debug("PERFORMANCE_LOGGED", "btc_regime: not enough candles yet")
+    """Refresh BTC regime every 2 min from Hyperliquid candles."""
+    from btc_regime import compute_adx
+    from hyperliquid_client import fetch_all_candles
+    candle_map = await fetch_all_candles(["BTC"], interval="15m", count=100)
+    candles    = candle_map.get("BTC", [])
+    if len(candles) < 30:
+        log.debug("PERFORMANCE_LOGGED", "btc_regime: not enough BTC candles")
         return
-
-    regime = compute_adx(ctx.btc_highs, ctx.btc_lows, ctx.btc_closes)
+    highs  = [c.high  for c in candles]
+    lows   = [c.low   for c in candles]
+    closes = [c.close for c in candles]
+    regime = compute_adx(highs, lows, closes)
     ctx.latest_regime  = regime
     ctx.last_regime_ts = _now_iso()
-
     log.info(
         "PERFORMANCE_LOGGED",
         f"BTC regime: {regime.regime} ADX={regime.adx:.2f} dir={regime.trend_direction}",
@@ -109,18 +114,14 @@ async def job_news_fetch() -> None:
 
 async def job_scan_cycle() -> None:
     """Full scan + ranking + notify every 5 min."""
-    if not ctx.snapshots:
-        log.debug("PERFORMANCE_LOGGED", "scan_cycle: no snapshots yet")
-        return
-
     t0 = time.monotonic()
 
     # Inject adaptive weights into scoring module
     live_weights = ctx.adaptive.get_weights()
     _patch_scoring_weights(live_weights)
 
-    # Run full scan
-    ranking = await run_scan_cycle(ctx.snapshots, ctx.btc_closes)
+    # Run full scan (fetches real data internally from Hyperliquid)
+    ranking = await run_scan_cycle()
     ctx.latest_ranking       = ranking
     ctx.last_scan_ts         = _now_iso()
     app_state["last_scan_timestamp"] = ctx.last_scan_ts

@@ -292,7 +292,7 @@ _shutdown_event = asyncio.Event()
 
 
 def _handle_signal(sig) -> None:
-    log.warning("SYSTEM_START", f"received {sig.name} — shutting down")
+    log.warning("SYSTEM_SHUTDOWN", f"received {sig.name} — shutting down")
     _shutdown_event.set()
 
 
@@ -303,7 +303,7 @@ def _handle_signal(sig) -> None:
 async def main() -> None:
     log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
     ai_key = bool(os.getenv("GROQ_API_KEY"))
-    log.info("SYSTEM_START", f"IA Claude: {"habilitada" if ai_key else "desabilitada — configure ANTHROPIC_API_KEY"}")
+    log.info("SYSTEM_START", f"IA Groq: {'habilitada' if ai_key else 'desabilitada — configure GROQ_API_KEY'}")
     app_state["started_at"] = _now_iso()
 
     loop = asyncio.get_running_loop()
@@ -314,7 +314,7 @@ async def main() -> None:
     try:
         await init_db()
     except RuntimeError as exc:
-        log.critical("SYSTEM_START", f"DB startup failed: {exc}")
+        log.critical("STARTUP_FAIL", f"DB startup failed: {exc}")
         return
 
     # ── 2. Performance tracker ───────────────────────────────────────────
@@ -377,7 +377,7 @@ async def main() -> None:
     await _shutdown_event.wait()
 
     # ── 10. Graceful teardown ────────────────────────────────────────────
-    log.info("SYSTEM_START", "initiating graceful shutdown")
+    log.info("SYSTEM_SHUTDOWN", "initiating graceful shutdown")
 
     await ctx.notifier.send_system_alert("🔴 *Crypto Monitor offline*\nShutting down.")
 
@@ -392,10 +392,10 @@ async def main() -> None:
     await close_db()
 
     await write_system_event(
-        "SYSTEM_START", "shutdown complete",
+        "SYSTEM_SHUTDOWN", "shutdown complete",
         level="INFO", module="main",
     )
-    log.info("SYSTEM_START", "=== shutdown complete ===")
+    log.info("SYSTEM_SHUTDOWN", "=== shutdown complete ===")
 
 
 # ---------------------------------------------------------------------------

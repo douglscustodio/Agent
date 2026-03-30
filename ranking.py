@@ -204,7 +204,7 @@ def rank_signals(
         )
 
     return RankingResult(
-        top=ranked_signals := top,
+        top=(ranked_signals := top),
         total_scored=len(scores),
         total_valid=len(valid_scores),
         watchlist=watchlist_scores,

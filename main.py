@@ -26,7 +26,7 @@ from macro_intelligence import MacroEngine
 from memory_engine import MemoryEngine
 from btc_regime import RegimeResult
 from config import config
-from database import init_db, close_db, write_system_event
+from database import init_db, close_db, write_system_event, flush_event_buffer
 from health_server import run_health_server, app_state
 from logger import get_logger
 from news_engine import NewsEngine, NewsArticle, NewsContext
@@ -120,12 +120,27 @@ async def job_scan_cycle() -> None:
     """Full scan + ranking + notify every 5 min."""
     t0 = time.monotonic()
 
-    # Inject adaptive weights into scoring module
+    # Get adaptive weights (learned from performance history)
     live_weights = ctx.adaptive.get_weights()
-    _patch_scoring_weights(live_weights)
 
-    # Run full scan (fetches real data internally from Hyperliquid)
-    ranking = await run_scan_cycle()
+    # Compute sector heat scores from latest news
+    # This feeds narrative momentum into per-symbol scores
+    sector_heat_map = ctx.news_engine.get_sector_heat_scores(
+        ctx.latest_articles
+    ) if ctx.latest_articles else {}
+    if sector_heat_map:
+        hot = {k: v for k, v in sector_heat_map.items() if v > 65}
+        cold = {k: v for k, v in sector_heat_map.items() if v < 35}
+        log.info(
+            "PERFORMANCE_LOGGED",
+            f"sector heat: hot={list(hot.keys())} cold={list(cold.keys())}",
+        )
+
+    # Run full scan — weights + sector heat + vol confirm all injected inside
+    ranking = await run_scan_cycle(
+        adaptive_weights=live_weights,
+        sector_heat_map=sector_heat_map,
+    )
     ctx.latest_ranking       = ranking
     ctx.last_scan_ts         = _now_iso()
     app_state["last_scan_timestamp"] = ctx.last_scan_ts
@@ -137,23 +152,16 @@ async def job_scan_cycle() -> None:
             sig.symbol, ctx.latest_articles
         )
 
-    # Sector rotation bonus (modifies scores before notify)
+    # Sector rotation (for logging/reporting only — heat already applied in scanner)
     if ranking.top:
         symbol_scores = {s.symbol: s.score for s in ranking.top}
         symbol_news   = {s.symbol: (news_map.get(s.symbol) or _empty_news(s.symbol)).impact_score
                          for s in ranking.top}
         sector_result = compute_sector_rotation(symbol_scores, symbol_news)
-
-        # Apply sector bonus to scores
-        for sig in ranking.top:
-            bonus = sector_result.sector_bonus.get(sig.symbol, 0.0)
-            if bonus > 0:
-                sig.result.total = min(sig.result.total + bonus, 100.0)
-                log.debug(
-                    "PERFORMANCE_LOGGED",
-                    f"sector bonus +{bonus} applied to {sig.symbol}",
-                    symbol=sig.symbol, score=sig.result.total,
-                )
+        log.info(
+            "PERFORMANCE_LOGGED",
+            f"sector rotation: hot={sector_result.hot_sectors} cold={sector_result.cold_sectors[:2]}",
+        )
 
     # Get macro snapshot and memory insights
     macro_snap = ctx.macro.get_snapshot()
@@ -171,6 +179,7 @@ async def job_scan_cycle() -> None:
                 direction=sig.direction,
                 score=sig.score,
                 entry_price=price,
+                dominant_component=sig.result.dominant_component,   # UPGRADE: feedback loop
             )
 
     log.timed("PERFORMANCE_LOGGED", f"scan cycle done: {len(ranking.top)} signals", t0)
@@ -214,6 +223,11 @@ async def job_daily_summary() -> None:
 async def job_adaptive_tune() -> None:
     """Re-tune scoring weights every 24 hours."""
     await ctx.adaptive.adapt(ctx.tracker)
+
+
+async def job_flush_events() -> None:
+    """Flush buffered DB events every 15 seconds."""
+    await flush_event_buffer()
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +341,7 @@ async def main() -> None:
         macro_refresh_fn= job_macro_refresh,
         btc_spike_fn=   job_btc_spike,
         daily_summary_fn= job_daily_summary,
+        flush_fn=       job_flush_events,          # UPGRADE: batch DB writes
     )
     sched.start()
 

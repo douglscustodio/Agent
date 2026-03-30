@@ -382,3 +382,101 @@ class NewsEngine:
             log.info("NEWS_FALLBACK_USED", f"{source_name} RSS: {len(articles)} articles fetched")
             await write_system_event("NEWS_FALLBACK_USED", f"using {source_name} RSS ({len(articles)} articles)", level="WARNING", module="news_engine")
         return articles
+
+    # ------------------------------------------------------------------
+    # UPGRADE: Sector heat scores
+    #
+    # Aggregates article impact across all symbols in a sector to
+    # produce a single "narrative heat" score per sector.
+    #
+    # Use case: if AI sector is receiving 3 high-impact articles in the
+    # last 2h (hack, partnership, ETF rumour), all AI tokens get a
+    # contextual boost — even if the article doesn't mention them by name.
+    # Conversely, a DeFi exploit article cools the entire DeFi sector.
+    #
+    # Returns: Dict[sector_key, heat_score] where heat_score ∈ [0, 100].
+    #   0   = no news / cold sector
+    #   50  = neutral background noise
+    #   100 = very hot — multiple high-impact articles recently
+    # ------------------------------------------------------------------
+
+    def get_sector_heat_scores(
+        self,
+        articles: List[NewsArticle],
+        sector_map: Optional[Dict[str, str]] = None,   # symbol → sector
+        window_minutes: int = 120,
+    ) -> Dict[str, float]:
+        """
+        Compute narrative heat score per sector from recent articles.
+
+        Algorithm:
+          1. Filter to articles within window_minutes.
+          2. For each article, find which sector(s) its symbols belong to.
+          3. Accumulate impact scores per sector (positive news = positive heat,
+             negative news = negative heat toward zero).
+          4. Normalise to [0, 100] with 50 as the neutral baseline.
+
+        Returns Dict[sector_key, heat_score].
+        Sectors not mentioned in any recent article return 50.0 (neutral).
+        """
+        from sector_rotation import classify_symbol  # lazy import to avoid circular
+
+        if sector_map is None:
+            sector_map = {}
+
+        cutoff = time.time() - window_minutes * 60
+
+        # Accumulate raw impact per sector
+        sector_impacts: Dict[str, List[float]] = {}
+
+        for article in articles:
+            if article.published_at < cutoff:
+                continue
+
+            # Determine which sectors this article touches
+            touched_sectors: set = set()
+            for sym in article.symbols:
+                sec = sector_map.get(sym.upper()) or classify_symbol(sym.upper())
+                if sec and sec != "STABLE":
+                    touched_sectors.add(sec)
+
+            # Also check title for sector keywords
+            title_upper = article.title.upper()
+            _KEYWORD_SECTORS = {
+                "AI":    ["AI", "ARTIFICIAL INTELLIGENCE", "MACHINE LEARNING", "NEURAL"],
+                "DEFI":  ["DEFI", "DEX", "PROTOCOL", "YIELD", "LIQUIDITY", "SWAP"],
+                "MEME":  ["MEME", "DOGE", "PEPE", "SHIB", "WIF"],
+                "L2":    ["LAYER 2", "L2", "ROLLUP", "ARBITRUM", "OPTIMISM"],
+                "L1":    ["LAYER 1", "L1", "ETHEREUM", "SOLANA", "BITCOIN"],
+                "INFRA": ["ORACLE", "CROSS-CHAIN", "BRIDGE", "INFRASTRUCTURE"],
+            }
+            for sec, keywords in _KEYWORD_SECTORS.items():
+                if any(kw in title_upper for kw in keywords):
+                    touched_sectors.add(sec)
+
+            if not touched_sectors:
+                continue
+
+            # Directional impact: negative news reduces heat, positive boosts it
+            signed_impact = article.impact_score
+            if article.sentiment == "negative":
+                signed_impact = -article.impact_score * 0.6  # negative news damps heat
+
+            for sec in touched_sectors:
+                sector_impacts.setdefault(sec, []).append(signed_impact)
+
+        # Aggregate and normalise
+        heat_scores: Dict[str, float] = {}
+        for sec, impacts in sector_impacts.items():
+            # Weighted sum; recent articles count more (already filtered by window)
+            raw = sum(impacts) / max(len(impacts), 1)  # mean impact
+            # Scale to [0, 100] with 50 as neutral
+            # raw range: roughly [-100, +100] → map to [0, 100]
+            heat = 50.0 + (raw * 0.5)
+            heat_scores[sec] = round(max(0.0, min(100.0, heat)), 2)
+
+        log.debug(
+            "PERFORMANCE_LOGGED",
+            f"sector heat scores: {heat_scores}",
+        )
+        return heat_scores

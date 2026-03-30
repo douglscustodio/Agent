@@ -67,11 +67,13 @@ class AppScheduler:
         name:     str,
         *,
         hours:    int = 0,
+        seconds:  int = 0,   # UPGRADE: sub-minute intervals (e.g. flush job)
         jitter:   int = 10,
     ) -> None:
         self._scheduler.add_job(
             self._wrap(fn, name),
             trigger=IntervalTrigger(
+                seconds=seconds,
                 minutes=minutes,
                 hours=hours,
                 jitter=jitter,
@@ -82,9 +84,10 @@ class AppScheduler:
             coalesce=True,
             misfire_grace_time=60,
         )
+        total_sec = hours*3600 + minutes*60 + seconds
         log.info(
             "SYSTEM_READY",
-            f"job registered: '{name}' every {hours*60+minutes}min",
+            f"job registered: '{name}' every {total_sec}s",
         )
 
     # ------------------------------------------------------------------
@@ -117,6 +120,7 @@ def build_scheduler(
     macro_refresh_fn:  Callable = None,
     btc_spike_fn:      Callable = None,
     daily_summary_fn:  Callable = None,
+    flush_fn:          Callable = None,    # UPGRADE: DB event buffer flush
 ) -> AppScheduler:
     """
     Wire all application jobs into the scheduler.
@@ -154,5 +158,9 @@ def build_scheduler(
 
     # Adaptive weight update: 24 hours
     sched.add_interval_job(adaptive_fn,    minutes=0,  name="adaptive_tune",   hours=24, jitter=600)
+
+    # UPGRADE: DB event buffer flush every 15 seconds
+    if flush_fn:
+        sched.add_interval_job(flush_fn,   minutes=0,  name="flush_events",    seconds=15, jitter=0)
 
     return sched

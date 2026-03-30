@@ -47,6 +47,7 @@ class PendingAlert:
     checked_4h:   bool = False
     checked_24h:  bool = False
     final_outcome: Optional[Outcome] = None
+    dominant_component: str = ""    # UPGRADE: component that drove this signal
 
 
 @dataclass
@@ -62,6 +63,7 @@ class PerformanceRecord:
     horizon_h:      int
     alerted_at:     float
     checked_at:     float
+    dominant_component: str = ""    # UPGRADE: for component win-rate feedback
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +83,14 @@ CREATE TABLE IF NOT EXISTS performance_log (
     outcome         VARCHAR(10)  NOT NULL,
     horizon_h       INTEGER      NOT NULL,
     alerted_at      TIMESTAMPTZ  NOT NULL,
-    checked_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    checked_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    dominant_component VARCHAR(40)  DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_perf_symbol    ON performance_log (symbol);
 CREATE INDEX IF NOT EXISTS idx_perf_outcome   ON performance_log (outcome);
 CREATE INDEX IF NOT EXISTS idx_perf_alerted   ON performance_log (alerted_at DESC);
+ALTER TABLE performance_log ADD COLUMN IF NOT EXISTS dominant_component VARCHAR(40) DEFAULT NULL;
+CREATE INDEX IF NOT EXISTS idx_perf_component ON performance_log (dominant_component);
 CREATE INDEX IF NOT EXISTS idx_perf_alert_id  ON performance_log (alert_id);
 """
 
@@ -165,6 +170,7 @@ class PerformanceTracker:
         direction:   str,
         score:       float,
         entry_price: float,
+        dominant_component: str = "",   # UPGRADE: for feedback loop
     ) -> None:
         pending = PendingAlert(
             alert_id=alert_id,
@@ -173,6 +179,7 @@ class PerformanceTracker:
             score=score,
             entry_price=entry_price,
             alerted_at=time.time(),
+            dominant_component=dominant_component,
         )
         self._pending[alert_id] = pending
         await self._persist_pending(pending)
@@ -354,8 +361,9 @@ class PerformanceTracker:
         sql = """
             INSERT INTO performance_log
                 (alert_id, symbol, direction, score, entry_price,
-                 check_price, pnl_pct, outcome, horizon_h, alerted_at, checked_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 check_price, pnl_pct, outcome, horizon_h, alerted_at, checked_at,
+                 dominant_component)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             ON CONFLICT DO NOTHING
         """
         alerted_dt = datetime.fromtimestamp(p.alerted_at, tz=timezone.utc)
@@ -365,7 +373,7 @@ class PerformanceTracker:
                 await conn.execute(
                     sql, p.alert_id, p.symbol, p.direction, p.score,
                     p.entry_price, 0.0, 0.0, Outcome.PENDING.value, 0,
-                    alerted_dt, alerted_dt,
+                    alerted_dt, alerted_dt, p.dominant_component or None,
                 )
         except Exception as exc:
             log.error("DB_CONNECT_FAIL", f"persist_pending failed: {exc}", db_status="DOWN")
@@ -374,8 +382,9 @@ class PerformanceTracker:
         sql = """
             INSERT INTO performance_log
                 (alert_id, symbol, direction, score, entry_price,
-                 check_price, pnl_pct, outcome, horizon_h, alerted_at, checked_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 check_price, pnl_pct, outcome, horizon_h, alerted_at, checked_at,
+                 dominant_component)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         """
         alerted_dt = datetime.fromtimestamp(r.alerted_at, tz=timezone.utc)
         checked_dt = datetime.fromtimestamp(r.checked_at, tz=timezone.utc)
@@ -385,7 +394,7 @@ class PerformanceTracker:
                 await conn.execute(
                     sql, r.alert_id, r.symbol, r.direction, r.score,
                     r.entry_price, r.check_price, r.pnl_pct, r.outcome.value,
-                    r.horizon_h, alerted_dt, checked_dt,
+                    r.horizon_h, alerted_dt, checked_dt, r.dominant_component or None,
                 )
         except Exception as exc:
             log.error("DB_CONNECT_FAIL", f"persist_record failed: {exc}", db_status="DOWN")

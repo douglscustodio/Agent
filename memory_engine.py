@@ -19,6 +19,11 @@ from logger import get_logger
 
 log = get_logger("memory_engine")
 
+# Memory limits — prevents unbounded RAM growth
+MAX_PATTERN_KEYS   = 500     # max distinct patterns remembered
+MAX_MEMORY_EVENTS  = 1000    # max rows in pattern_log kept in DB
+MAX_SECTOR_KEYS    = 100
+
 # ---------------------------------------------------------------------------
 # DB Schema
 # ---------------------------------------------------------------------------
@@ -133,6 +138,7 @@ class MemoryEngine:
     async def startup(self) -> None:
         await ensure_memory_schema()
         await self._load_from_db()
+        await self._purge_old_patterns()
         log.info("SYSTEM_READY", f"memory engine ready: {len(self._patterns)} patterns loaded")
 
     # ------------------------------------------------------------------
@@ -183,7 +189,7 @@ class MemoryEngine:
         )
 
         log.info(
-            "PERFORMANCE_LOGGED",
+            "MEMORY_UPDATED",
             f"memory updated: {pattern_key} win_rate={self._patterns[pattern_key].win_rate:.1f}%",
             symbol=symbol, score=score,
         )
@@ -312,6 +318,33 @@ class MemoryEngine:
         except Exception as exc:
             log.error("DB_CONNECT_FAIL", f"log pattern failed: {exc}", db_status="DOWN")
 
+    async def _purge_old_patterns(self) -> None:
+        """Remove oldest pattern_log rows and trim in-memory dicts."""
+        # Trim in-memory dicts
+        if len(self._patterns) > MAX_PATTERN_KEYS:
+            # Remove lowest confidence patterns first
+            sorted_keys = sorted(self._patterns, key=lambda k: self._patterns[k].confidence)
+            for k in sorted_keys[:len(self._patterns) - MAX_PATTERN_KEYS]:
+                del self._patterns[k]
+            log.info("MEMORY_PURGE", f"trimmed patterns to {len(self._patterns)}")
+
+        if len(self._sector_memory) > MAX_SECTOR_KEYS:
+            sorted_keys = sorted(self._sector_memory, key=lambda k: self._sector_memory[k].signals)
+            for k in sorted_keys[:len(self._sector_memory) - MAX_SECTOR_KEYS]:
+                del self._sector_memory[k]
+
+        # Trim DB pattern_log
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"""DELETE FROM pattern_log WHERE id NOT IN (
+                        SELECT id FROM pattern_log ORDER BY logged_at DESC LIMIT {MAX_MEMORY_EVENTS}
+                    )"""
+                )
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"purge pattern_log failed: {exc}", db_status="DOWN")
+
     async def _load_from_db(self) -> None:
         sql = "SELECT memory_type, key, value FROM agent_memory"
         try:
@@ -344,7 +377,7 @@ class MemoryEngine:
                     )
                     self._sector_memory[row["key"]] = sm
         except Exception as exc:
-            log.warning("PERFORMANCE_LOGGED", f"memory load failed: {exc}")
+            log.warning("MEMORY_LOAD_FAIL", f"memory load failed: {exc}")
 
     @staticmethod
     def _make_pattern_key(regime: str, sector: str, direction: str, score: float) -> str:

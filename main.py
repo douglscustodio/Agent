@@ -63,7 +63,6 @@ class AppContext:
         self.btc_highs:            List[float]          = []
         self.btc_lows:             List[float]          = []
         self.latest_regime:        Optional[RegimeResult]  = None
-        self.snapshots:            List[MarketSnapshot] = []
         self.last_scan_ts:         Optional[str]        = None
         self.last_news_ts:         Optional[str]        = None
         self.last_regime_ts:       Optional[str]        = None
@@ -87,7 +86,7 @@ async def job_btc_regime() -> None:
     candle_map = await fetch_all_candles(["BTC"], interval="15m", count=100)
     candles    = candle_map.get("BTC", [])
     if len(candles) < 30:
-        log.debug("PERFORMANCE_LOGGED", "btc_regime: not enough BTC candles")
+        log.debug("BTC_REGIME_UPDATED", "btc_regime: not enough BTC candles")
         return
     highs  = [c.high  for c in candles]
     lows   = [c.low   for c in candles]
@@ -96,29 +95,42 @@ async def job_btc_regime() -> None:
     ctx.latest_regime  = regime
     ctx.last_regime_ts = _now_iso()
     log.info(
-        "PERFORMANCE_LOGGED",
+        "BTC_REGIME_UPDATED",
         f"BTC regime: {regime.regime} ADX={regime.adx:.2f} dir={regime.trend_direction}",
     )
 
 
 async def job_news_fetch() -> None:
-    """Refresh news cache every 3 min."""
-    t0       = time.monotonic()
-    articles = await ctx.news_engine.fetch_all()
-    ctx.latest_articles = articles
-    ctx.last_news_ts    = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_news_ts
+    """Refresh news + macro in parallel every 3 min."""
+    t0 = time.monotonic()
+    async def _fetch_news():
+        try:
+            return await asyncio.wait_for(ctx.news_engine.fetch_all(), timeout=8.0)
+        except asyncio.TimeoutError:
+            log.warning("NEWS_TIMEOUT", "news fetch timed out — using cache")
+            return ctx.latest_articles or []
 
-    log.timed(
-        "PERFORMANCE_LOGGED",
-        f"news fetch: {len(articles)} articles",
-        t0,
+    articles, _ = await asyncio.gather(
+        _fetch_news(),
+        ctx.macro.refresh(),
+        return_exceptions=True,
     )
+    if isinstance(articles, list):
+        ctx.latest_articles = articles
+    ctx.last_news_ts = _now_iso()
+    app_state["last_scan_timestamp"] = ctx.last_news_ts
+    log.timed("NEWS_FETCH_COMPLETE", f"news+macro parallel: {len(ctx.latest_articles)} articles", t0)
 
 
 async def job_scan_cycle() -> None:
     """Full scan + ranking + notify every 5 min."""
     t0 = time.monotonic()
+
+    # Guard: skip high-confidence trades if WS is not connected
+    current_ws_status = ws_state.get("status", "DISCONNECTED")
+    if current_ws_status != "CONNECTED":
+        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan cycle")
+        return
 
     # Get adaptive weights (learned from performance history)
     live_weights = ctx.adaptive.get_weights()
@@ -132,15 +144,22 @@ async def job_scan_cycle() -> None:
         hot = {k: v for k, v in sector_heat_map.items() if v > 65}
         cold = {k: v for k, v in sector_heat_map.items() if v < 35}
         log.info(
-            "PERFORMANCE_LOGGED",
+            "SCAN_SECTOR_HEAT",
             f"sector heat: hot={list(hot.keys())} cold={list(cold.keys())}",
         )
 
     # Run full scan — weights + sector heat + vol confirm all injected inside
-    ranking = await run_scan_cycle(
-        adaptive_weights=live_weights,
-        sector_heat_map=sector_heat_map,
-    )
+    try:
+        ranking = await asyncio.wait_for(
+            run_scan_cycle(
+                adaptive_weights=live_weights,
+                sector_heat_map=sector_heat_map,
+            ),
+            timeout=25.0,
+        )
+    except asyncio.TimeoutError:
+        log.error("SCAN_TIMEOUT", "scan cycle timed out after 25s — skipping")
+        return
     ctx.latest_ranking       = ranking
     ctx.last_scan_ts         = _now_iso()
     app_state["last_scan_timestamp"] = ctx.last_scan_ts
@@ -159,7 +178,7 @@ async def job_scan_cycle() -> None:
                          for s in ranking.top}
         sector_result = compute_sector_rotation(symbol_scores, symbol_news)
         log.info(
-            "PERFORMANCE_LOGGED",
+            "SCAN_SECTOR_ROTATION",
             f"sector rotation: hot={sector_result.hot_sectors} cold={sector_result.cold_sectors[:2]}",
         )
 
@@ -182,7 +201,7 @@ async def job_scan_cycle() -> None:
                 dominant_component=sig.result.dominant_component,   # UPGRADE: feedback loop
             )
 
-    log.timed("PERFORMANCE_LOGGED", f"scan cycle done: {len(ranking.top)} signals", t0)
+    log.timed("SCAN_COMPLETE", f"scan cycle done: {len(ranking.top)} signals", t0)
 
 
 async def job_performance_checks() -> None:
@@ -242,7 +261,7 @@ def _patch_scoring_weights(weights: Dict[str, float]) -> None:
             if k in scoring.WEIGHTS:
                 scoring.WEIGHTS[k] = v
     except Exception as exc:
-        log.error("PERFORMANCE_LOGGED", f"weight patch failed: {exc}")
+        log.error("WEIGHT_UPDATE_FAIL", f"weight patch failed: {exc}")
 
 
 def _get_price(symbol: str) -> Optional[float]:
@@ -283,7 +302,7 @@ def _handle_signal(sig) -> None:
 
 async def main() -> None:
     log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
-    ai_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+    ai_key = bool(os.getenv("GROQ_API_KEY"))
     log.info("SYSTEM_START", f"IA Claude: {"habilitada" if ai_key else "desabilitada — configure ANTHROPIC_API_KEY"}")
     app_state["started_at"] = _now_iso()
 

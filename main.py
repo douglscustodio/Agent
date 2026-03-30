@@ -282,7 +282,9 @@ def _handle_signal(sig) -> None:
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
-    log.info("SYSTEM_START", "=== Crypto Monitor starting (Phase 4) ===")
+    log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
+    ai_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+    log.info("SYSTEM_START", f"IA Claude: {"habilitada" if ai_key else "desabilitada — configure ANTHROPIC_API_KEY"}")
     app_state["started_at"] = _now_iso()
 
     loop = asyncio.get_running_loop()

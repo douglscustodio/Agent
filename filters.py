@@ -114,7 +114,7 @@ def filter_rsi(
 # 2. Bollinger Band Width Anti-FOMO Filter
 # ---------------------------------------------------------------------------
 
-BB_WIDTH_FOMO_THRESHOLD = 0.08
+BB_WIDTH_FOMO_THRESHOLD = 0.12   # 0.08 era muito restritivo para crypto; 12% é o real FOMO
 BB_PERIOD = 20
 BB_STD    = 2.0
 
@@ -146,7 +146,7 @@ def filter_bb_width(closes: List[float], symbol: str = "") -> FilterResult:
 # 3. ATR Late-Entry Filter
 # ---------------------------------------------------------------------------
 
-ATR_LATE_ENTRY_MULTIPLIER = 1.5
+ATR_LATE_ENTRY_MULTIPLIER = 2.0   # 1.5 era muito restritivo; 2.0 ATR de folga
 
 
 def _compute_atr(

@@ -19,6 +19,42 @@ from logger import get_logger
 log = get_logger("macro_intelligence")
 
 # ---------------------------------------------------------------------------
+# Tradução de termos em inglês para PT-BR (eventos macro RSS)
+# ---------------------------------------------------------------------------
+
+_MACRO_TRANSLATE_MAP = {
+    "interest rate": "taxa de juros",
+    "federal reserve": "Federal Reserve (Fed)",
+    "inflation": "inflação",
+    "cpi": "CPI (inflação)",
+    "gdp": "PIB",
+    "nonfarm payroll": "folha de pagamentos EUA",
+    "unemployment": "desemprego",
+    "fomc": "reunião Fed (FOMC)",
+    "rate hike": "aumento de juros",
+    "rate cut": "corte de juros",
+    "bitcoin etf": "ETF de Bitcoin",
+    "crypto regulation": "regulação de crypto",
+    "sec": "SEC (regulador EUA)",
+    "war": "conflito geopolítico",
+    "sanctions": "sanções",
+    "recession": "recessão",
+}
+
+def _translate_event_title(title: str) -> str:
+    """Traduz termos-chave de títulos de eventos macro do inglês para PT-BR."""
+    import re
+    result = title
+    t_lower = title.lower()
+    for en, pt in _MACRO_TRANSLATE_MAP.items():
+        if en in t_lower:
+            pattern = re.compile(re.escape(en), re.IGNORECASE)
+            result = pattern.sub(pt, result, count=1)
+            break
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -232,10 +268,10 @@ def _compute_risk(snap: MacroSnapshot) -> tuple:
     high_pos = [e for e in snap.events if e.impact == "HIGH" and e.sentiment == "positive"]
     if high_neg:
         score += 15; bearish_pts += 2
-        explanations.append(f"🔴 Evento macro negativo: {high_neg[0].title[:60]}")
+        explanations.append(f"🔴 Evento macro negativo: {_translate_event_title(high_neg[0].title)[:60]}")
     if high_pos:
         score -= 10; bullish_pts += 2
-        explanations.append(f"🟢 Evento macro positivo: {high_pos[0].title[:60]}")
+        explanations.append(f"🟢 Evento macro positivo: {_translate_event_title(high_pos[0].title)[:60]}")
 
     # Clamp
     score = max(0, min(100, score))
@@ -340,7 +376,7 @@ class MacroEngine:
             f"_{now_str}_",
             "",
             f"*Risco de mercado: {snap.risk_label}*",
-            f"*Viés para crypto: {'🟢 ALTISTA' if snap.crypto_bias == 'BULLISH' else ('🔴 BAIXISTA' if snap.crypto_bias == 'BEARISH' else '⚪ NEUTRO')}*",
+            f"*Viés para crypto: {'🟢 ALTISTA' if snap.crypto_bias == 'BULLISH' else ('🔴 BAIXISTA' if snap.crypto_bias == 'BEARISH' else '⚪ NEUTRO')}*",  # PT-BR
             "",
             "*📈 Mercados tradicionais:*",
         ]
@@ -370,7 +406,8 @@ class MacroEngine:
                 lines.append("*📰 Eventos de alto impacto:*")
                 for e in high_events:
                     emoji = "🔴" if e.sentiment == "negative" else ("🟢" if e.sentiment == "positive" else "⚪")
-                    lines.append(f"• {emoji} {e.title[:80]}")
+                    title_pt = _translate_event_title(e.title)
+                    lines.append(f"• {emoji} {title_pt[:80]}")
 
         lines.append("")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")

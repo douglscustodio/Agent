@@ -18,8 +18,8 @@ from logger import get_logger
 
 log = get_logger("alerts_dedup")
 
-COOLDOWN_SECONDS   = 7_200    # 2 hours
-SCORE_DELTA_OVERRIDE = 10.0   # resend if score improved by this much
+COOLDOWN_SECONDS   = 3_600    # 1 hora (era 2h — muito agressivo)
+SCORE_DELTA_OVERRIDE = 8.0    # reenviar se score melhorou 8+ pts
 
 # ---------------------------------------------------------------------------
 # In-memory cache entry

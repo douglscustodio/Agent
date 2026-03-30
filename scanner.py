@@ -197,13 +197,14 @@ def _detect_direction(candles: List[Candle]) -> str:
 # ---------------------------------------------------------------------------
 
 async def scan_symbol(
-    symbol:      str,
-    candles:     List[Candle],
-    meta:        "AssetMeta",
-    btc_candles: List[Candle],
-    volume_24h:  float,
-    adaptive_weights: Optional[Dict] = None,   # from AdaptiveEngine
-    sector_heat_map:  Optional[Dict[str, float]] = None,  # UPGRADE: from NewsEngine
+    symbol:           str,
+    candles:          List[Candle],
+    meta:             "AssetMeta",
+    btc_candles:      List[Candle],
+    volume_24h:       float,
+    adaptive_weights: Optional[Dict] = None,
+    sector_heat_map:  Optional[Dict[str, float]] = None,
+    macro_snap        = None,    # MacroSnapshot — injected from AppContext
 ) -> Optional[ScoreResult]:
     if len(candles) < 30:
         log.warning("SCAN_SYMBOL_SKIP", f"skip {symbol}: insufficient candles ({len(candles)})", symbol=symbol)
@@ -275,6 +276,10 @@ async def scan_symbol(
     _heat   = (sector_heat_map or {}).get(_sector, 50.0)
 
     # 11. Score (with adaptive weights + context bonuses injected)
+    # Macro context for unified scoring
+    _macro_risk = macro_snap.risk_score if macro_snap else 50.0
+    _macro_bias = macro_snap.crypto_bias if macro_snap else "NEUTRO"
+
     score = compute_score(
         symbol=symbol,
         direction=direction,
@@ -327,7 +332,8 @@ async def run_scan_cycle(
     snapshots:        list = None,
     btc_closes:       list = None,
     adaptive_weights: Optional[Dict] = None,
-    sector_heat_map:  Optional[Dict[str, float]] = None,  # UPGRADE: from NewsEngine
+    sector_heat_map:  Optional[Dict[str, float]] = None,
+    macro_snap        = None,
 ) -> RankingResult:
     symbols = get_symbols()
     t0      = time.monotonic()
@@ -368,7 +374,8 @@ async def run_scan_cycle(
                 sym, candles, meta, btc_candles,
                 vol_map.get(sym, 0.0),
                 adaptive_weights=adaptive_weights,
-                sector_heat_map=sector_heat_map,     # FIX: was missing, sector heat was always 50
+                sector_heat_map=sector_heat_map,
+                macro_snap=macro_snap,               # FIX: macro context per-symbol
             )
         )
         valid_syms.append(sym)

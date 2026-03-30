@@ -154,6 +154,7 @@ async def job_scan_cycle() -> None:
             run_scan_cycle(
                 adaptive_weights=live_weights,
                 sector_heat_map=sector_heat_map,
+                macro_snap=ctx.macro.get_snapshot(),   # FIX: macro per-symbol
             ),
             timeout=25.0,
         )
@@ -319,6 +320,7 @@ async def main() -> None:
 
     # ── 2. Performance tracker ───────────────────────────────────────────
     await ctx.tracker.startup()
+    ctx.tracker.set_memory(ctx.memory)   # feedback loop: outcomes → memory engine
 
     # ── 3. Adaptive engine ───────────────────────────────────────────────
     await ctx.adaptive.startup()
@@ -371,6 +373,11 @@ async def main() -> None:
         "all subsystems running — scheduler active",
         level="INFO", module="main",
     )
+    # Make subsystem references available to health_server
+    app_state["macro_snap"]    = ctx.macro      # health_server reads .get_snapshot()
+    app_state["memory_engine"] = ctx.memory
+    app_state["ai_enabled"]    = ctx.ai.enabled
+
     log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
 
     # ── 9. Run until signal ──────────────────────────────────────────────

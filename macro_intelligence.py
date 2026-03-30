@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
+from retry_utils import retry_async
+
 from database import write_system_event
 from logger import get_logger
 
@@ -130,7 +132,7 @@ class MacroSnapshot:
 # Yahoo Finance fetcher
 # ---------------------------------------------------------------------------
 
-async def _fetch_yf(
+async def _fetch_yf_once(
     session: aiohttp.ClientSession,
     ticker:  str,
     name:    str,
@@ -156,7 +158,7 @@ async def _fetch_yf(
                 price=price, change_pct=round(change, 2), trend=trend,
             )
     except Exception as exc:
-        log.warning("PERFORMANCE_LOGGED", f"YF fetch failed {ticker}: {exc}")
+        log.warning("MACRO_REFRESH_DONE", f"YF fetch failed {ticker}: {exc}")
         return None
 
 
@@ -352,12 +354,12 @@ class MacroEngine:
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         log.info(
-            "PERFORMANCE_LOGGED",
+            "MACRO_REFRESH_DONE",
             f"macro refresh: risk={snap.risk_score} bias={snap.crypto_bias} events={len(snap.events)}",
             latency_ms=elapsed,
         )
         await write_system_event(
-            "PERFORMANCE_LOGGED",
+            "MACRO_REFRESH_DONE",
             f"macro snapshot: risk={snap.risk_score} bias={snap.crypto_bias}",
             level="INFO", module="macro_intelligence",
             score=snap.risk_score, latency_ms=elapsed,

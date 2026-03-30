@@ -48,13 +48,50 @@ class HealthConfig:
 
 
 @dataclass(frozen=True)
+class ScannerConfig:
+    symbols:          str   = field(default_factory=lambda: _optional(
+                                  "SCAN_SYMBOLS",
+                                  "BTC,ETH,SOL,ARB,OP,AVAX,NEAR,APT,SUI,INJ,TIA,WIF,PEPE,DOGE,LINK,AAVE,FET,RNDR,TAO"
+                              ))
+    interval:         str   = field(default_factory=lambda: _optional("SCAN_INTERVAL", "15m"))
+    candle_count:     int   = field(default_factory=lambda: int(_optional("SCAN_CANDLE_COUNT", "200")))
+
+    @property
+    def symbol_list(self) -> list:
+        return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+
+
+@dataclass(frozen=True)
+class APIConfig:
+    groq_api_key:        str = field(default_factory=lambda: _optional("GROQ_API_KEY", ""))
+    cryptopanic_token:   str = field(default_factory=lambda: _optional("CRYPTOPANIC_TOKEN", ""))
+    telegram_bot_token:  str = field(default_factory=lambda: _optional("TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_id:    str = field(default_factory=lambda: _optional("TELEGRAM_CHAT_ID", ""))
+
+    @property
+    def ai_enabled(self) -> bool:
+        return bool(self.groq_api_key)
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_chat_id)
+
+
+@dataclass(frozen=True)
 class AppConfig:
-    env: str      = field(default_factory=lambda: _optional("APP_ENV", "production"))
+    env:       str = field(default_factory=lambda: _optional("APP_ENV", "production"))
     log_level: str = field(default_factory=lambda: _optional("LOG_LEVEL", "INFO"))
-    db: DatabaseConfig    = field(default_factory=DatabaseConfig)
-    ws: WebSocketConfig   = field(default_factory=WebSocketConfig)
-    health: HealthConfig  = field(default_factory=HealthConfig)
+    db:        DatabaseConfig  = field(default_factory=DatabaseConfig)
+    ws:        WebSocketConfig = field(default_factory=WebSocketConfig)
+    health:    HealthConfig    = field(default_factory=HealthConfig)
+    scanner:   ScannerConfig   = field(default_factory=ScannerConfig)
+    api:       APIConfig       = field(default_factory=APIConfig)
 
 
 # Singleton — import this everywhere
 config = AppConfig()
+
+
+# Re-export for convenience
+__all__ = ["config", "AppConfig", "DatabaseConfig", "WebSocketConfig",
+           "HealthConfig", "ScannerConfig", "APIConfig"]

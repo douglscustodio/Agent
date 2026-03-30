@@ -6,6 +6,7 @@ Endpoints:
 """
 
 import json
+import time
 from datetime import datetime, timezone
 
 from aiohttp import web
@@ -63,18 +64,53 @@ async def handle_health(request: web.Request) -> web.Response:
 
 async def handle_status(request: web.Request) -> web.Response:
     """
-    GET /status — detailed operational status.
+    GET /status — detailed operational status for all subsystems.
     """
     db_ok = await db_ping()
+
+    # Macro snapshot
+    macro_info = {}
+    try:
+        macro_engine = app_state.get("macro_snap")  # actually MacroEngine instance
+        if macro_engine:
+            snap = macro_engine.get_snapshot() if hasattr(macro_engine, "get_snapshot") else None
+            if snap:
+                macro_info = {
+                    "risk_score":    snap.risk_score,
+                    "risk_label":    snap.risk_label,
+                    "crypto_bias":   snap.crypto_bias,
+                    "updated_ago_s": round(time.time() - snap.updated_at),
+                }
+    except Exception:
+        pass
+
+    # Memory stats
+    memory_info = {}
+    try:
+        mem = app_state.get("memory_engine")
+        if mem:
+            hot = mem.get_hot_sectors("TRENDING")
+            ignore = mem.get_ignore_patterns()
+            memory_info = {
+                "patterns_learned": len(mem._patterns),
+                "hot_sectors":      hot[:5],
+                "ignored_patterns": len(ignore),
+            }
+    except Exception:
+        pass
+
     body = {
-        "ws_status":            ws_state["status"],
-        "ws_connected_at":      ws_state.get("connected_at"),
-        "ws_last_message_at":   ws_state.get("last_message_at"),
+        "ws_status":             ws_state["status"],
+        "ws_connected_at":       ws_state.get("connected_at"),
+        "ws_last_message_at":    ws_state.get("last_message_at"),
         "ws_reconnect_attempts": ws_state.get("reconnect_attempts", 0),
-        "db_status":            "UP" if db_ok else "DOWN",
-        "last_scan_timestamp":  app_state.get("last_scan_timestamp"),
-        "started_at":           app_state.get("started_at"),
-        "timestamp":            _now_iso(),
+        "db_status":             "UP" if db_ok else "DOWN",
+        "last_scan_timestamp":   app_state.get("last_scan_timestamp"),
+        "started_at":            app_state.get("started_at"),
+        "macro":                 macro_info,
+        "memory":                memory_info,
+        "ai_enabled":            app_state.get("ai_enabled", False),
+        "timestamp":             _now_iso(),
     }
     return web.Response(
         status=200,

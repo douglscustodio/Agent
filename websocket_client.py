@@ -43,46 +43,22 @@ def _now_iso() -> str:
 
 async def _handle_message(raw: str) -> None:
     """
-    Process raw WebSocket frames from Hyperliquid.
-    Channels handled:
-      allMids  → populate ws_price_cache (used by notifier + performance tracker)
-      pong     → heartbeat acknowledged
+    Process a raw WebSocket message.
+    Phase 1: parse JSON and log receipt only.
+    Phase 2: route to scanner/signal logic.
     """
     ws_state["last_message_at"] = _now_iso()
     try:
         data = json.loads(raw)
+        log.debug(
+            "WS_CONNECTED",
+            "message received",
+            ws_status="OPEN",
+        )
+        # TODO Phase 2: dispatch data to scanner
+        _ = data
     except json.JSONDecodeError as exc:
-        log.warning("WS_INVALID_FRAME", f"non-JSON frame: {exc}", ws_status="OPEN")
-        return
-
-    channel = data.get("channel", "")
-
-    # ── allMids: live mid-prices for all perps ────────────────────────
-    if channel == "allMids":
-        mids = data.get("data", {}).get("mids", {})
-        if not isinstance(mids, dict):
-            return
-        for sym, price_str in mids.items():
-            try:
-                ws_price_cache[sym] = float(price_str)
-            except (ValueError, TypeError):
-                pass
-        log.debug("WS_PRICE_UPDATE", f"price cache updated: {len(mids)} symbols",
-                  ws_status="OPEN")
-        # Dispatch to scanner for on_market_data hook
-        try:
-            from scanner import on_market_data
-            await on_market_data(data)
-        except Exception as exc:
-            log.warning("WS_DISPATCH_ERROR", f"scanner dispatch failed: {exc}")
-
-    # ── pong: heartbeat acknowledged ─────────────────────────────────
-    elif channel == "pong" or data.get("method") == "pong":
-        log.debug("WS_HEARTBEAT_ACK", "pong received", ws_status="OPEN")
-
-    # ── Unknown frame: log at debug ───────────────────────────────────
-    else:
-        log.debug("WS_FRAME_UNKNOWN", f"unknown channel={channel!r}", ws_status="OPEN")
+        log.warning("WS_CONNECTED", f"non-JSON frame received: {exc}", ws_status="OPEN")
 
 
 # ---------------------------------------------------------------------------

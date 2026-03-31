@@ -43,24 +43,12 @@ log = get_logger("notifier")
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 SEND_TIMEOUT = 10
 
-BTC_SPIKE_PCT      = 3.0
-BTC_ALERT_COOLDOWN = 1800   # 30 min entre alertas de BTC
+BTC_SPIKE_PCT     = 3.0
+_last_btc_price:  float = 0.0
+_last_btc_alert:  float = 0.0
+BTC_ALERT_COOLDOWN = 1800
 
-
-class _NotifierState:
-    """Estado mutável do notifier encapsulado — sem globais soltos."""
-    __slots__ = ("last_btc_price", "last_btc_alert", "daily_signals")
-
-    def __init__(self) -> None:
-        self.last_btc_price: float      = 0.0
-        self.last_btc_alert: float      = 0.0
-        self.daily_signals:  List[dict] = []
-
-    def reset_daily(self) -> None:
-        self.daily_signals.clear()
-
-
-_state = _NotifierState()
+_daily_signals: List[dict] = []
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +376,7 @@ def _build_signal_message(
         lines.append("• Este é um sinal, não uma garantia de lucro")
         lines.append("")
 
-        _state.daily_signals.append({
+        _daily_signals.append({
             "symbol": sym, "direction": direction,
             "score": score, "price": price,
             "sl": sl if price > 0 else 0,
@@ -455,7 +443,7 @@ async def build_market_report(news_engine=None) -> str:
             lines.append(f"• Força da tendência (ADX): `{regime.adx:.1f}`")
             lines.append("")
     except Exception as exc:
-        log.warning("NOTIFIER_EVENT", f"market report regime error: {exc}")
+        log.warning("PERFORMANCE_LOGGED", f"market report regime error: {exc}")
 
     # UPGRADE: Notícias recentes — com contexto PT-BR + link
     if news_engine:
@@ -502,19 +490,20 @@ async def build_market_report(news_engine=None) -> str:
 # ---------------------------------------------------------------------------
 
 async def check_btc_spike(notifier: "Notifier") -> None:
+    global _last_btc_price, _last_btc_alert
 
     current = _get_price("BTC")
     if current <= 0:
         return
 
-    if _state.last_btc_price <= 0:
-        _state.last_btc_price = current
+    if _last_btc_price <= 0:
+        _last_btc_price = current
         return
 
-    pct_change = (current - _state.last_btc_price) / _state.last_btc_price * 100
+    pct_change = (current - _last_btc_price) / _last_btc_price * 100
     now = time.time()
 
-    if abs(pct_change) >= BTC_SPIKE_PCT and (now - _state.last_btc_alert) > BTC_ALERT_COOLDOWN:
+    if abs(pct_change) >= BTC_SPIKE_PCT and (now - _last_btc_alert) > BTC_ALERT_COOLDOWN:
         direction = "SUBIU" if pct_change > 0 else "CAIU"
         emoji     = "🚀" if pct_change > 0 else "💥"
         impact    = "pode abrir oportunidades de LONG" if pct_change > 0 else (
@@ -526,7 +515,7 @@ async def check_btc_spike(notifier: "Notifier") -> None:
             f"_{_now_br()}_\n\n"
             f"• BTC *{direction}* `{abs(pct_change):.1f}%` rapidamente\n"
             f"• Preço atual: `${current:,.2f}`\n"
-            f"• Preço anterior: `${_state.last_btc_price:,.2f}`\n\n"
+            f"• Preço anterior: `${_last_btc_price:,.2f}`\n\n"
             f"*O que isso significa?*\n"
             f"• {impact}\n"
             f"• Aguarde confirmação antes de entrar em novas posições\n"
@@ -534,8 +523,8 @@ async def check_btc_spike(notifier: "Notifier") -> None:
             f"_Jarvis AI Trading Monitor_"
         )
         await notifier.send_system_alert(msg)
-        _state.last_btc_alert = now
-        _state.last_btc_price = current
+        _last_btc_alert = now
+        _last_btc_price = current
 
         log.info("ALERT_SENT", f"BTC spike alert enviado: {pct_change:.1f}%")
         await write_system_event(
@@ -543,7 +532,7 @@ async def check_btc_spike(notifier: "Notifier") -> None:
             level="INFO", module="notifier", symbol="BTC", score=abs(pct_change),
         )
     else:
-        _state.last_btc_price = current * 0.9 + _state.last_btc_price * 0.1
+        _last_btc_price = current * 0.9 + _last_btc_price * 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +540,7 @@ async def check_btc_spike(notifier: "Notifier") -> None:
 # ---------------------------------------------------------------------------
 
 async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
+    global _daily_signals
 
     lines = [
         "📋 *RESUMO DO DIA*",
@@ -558,12 +548,12 @@ async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
         "",
     ]
 
-    total = len(_state.daily_signals)
+    total = len(_daily_signals)
     if total == 0:
         lines.append("Nenhum sinal enviado hoje.")
     else:
         lines.append(f"*📊 Sinais enviados hoje: {total}*")
-        for s in _state.daily_signals[-10:]:
+        for s in _daily_signals[-10:]:
             dir_emoji = "📈" if s["direction"] == "LONG" else "📉"
             lines.append(
                 f"• {dir_emoji} {s['symbol']} {s['direction']} — "
@@ -590,7 +580,7 @@ async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
                 lines.append(f"• PnL médio: `{avg_pnl:+.2f}%`")
                 lines.append("")
         except Exception as exc:
-            log.warning("NOTIFIER_EVENT", f"daily summary stats error: {exc}")
+            log.warning("PERFORMANCE_LOGGED", f"daily summary stats error: {exc}")
 
     lines.append("*💡 Lembre-se:*")
     lines.append("• Gerencie bem o risco — 1 a 2% por operação")
@@ -601,7 +591,7 @@ async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
     lines.append("_Jarvis AI Trading Monitor_")
 
     await notifier.send_system_alert("\n".join(lines))
-    _state.daily_signals.clear()
+    _daily_signals.clear()
     log.info("ALERT_SENT", "resumo diário enviado")
 
 
@@ -717,7 +707,7 @@ class Notifier:
         reproved = [sym for sym, ai in ai_map.items() if not ai.approved]
         if reproved:
             log.warning(
-                "NOTIFIER_EVENT",
+                "PERFORMANCE_LOGGED",
                 f"IA marcou cautela em: {reproved} — sinais enviados com aviso",
             )
 

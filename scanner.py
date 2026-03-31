@@ -165,7 +165,7 @@ def detect_crowded_trade(
             f"oi_score={oi_score:.0f}"
         )
         log.warning(
-            "CROWDED_TRADE_DETECTED",
+            "PERFORMANCE_LOGGED",
             f"CROWDED TRADE detected: {symbol} — {reason}",
             symbol=symbol,
         )
@@ -197,17 +197,16 @@ def _detect_direction(candles: List[Candle]) -> str:
 # ---------------------------------------------------------------------------
 
 async def scan_symbol(
-    symbol:           str,
-    candles:          List[Candle],
-    meta:             "AssetMeta",
-    btc_candles:      List[Candle],
-    volume_24h:       float,
-    adaptive_weights: Optional[Dict] = None,
-    sector_heat_map:  Optional[Dict[str, float]] = None,
-    macro_snap        = None,    # MacroSnapshot — injected from AppContext
+    symbol:      str,
+    candles:     List[Candle],
+    meta:        "AssetMeta",
+    btc_candles: List[Candle],
+    volume_24h:  float,
+    adaptive_weights: Optional[Dict] = None,   # from AdaptiveEngine
+    sector_heat_map:  Optional[Dict[str, float]] = None,  # UPGRADE: from NewsEngine
 ) -> Optional[ScoreResult]:
     if len(candles) < 30:
-        log.warning("SCAN_SYMBOL_SKIP", f"skip {symbol}: insufficient candles ({len(candles)})", symbol=symbol)
+        log.warning("PERFORMANCE_LOGGED", f"skip {symbol}: insufficient candles ({len(candles)})", symbol=symbol)
         return None
 
     t0 = time.monotonic()
@@ -225,13 +224,13 @@ async def scan_symbol(
     last_ts = candles[-1].timestamp
     cf = check_candle_freshness(last_ts, symbol)
     if not cf.is_fresh:
-        log.warning("SCAN_SYMBOL_SKIP", f"skip {symbol}: stale candles", symbol=symbol)
+        log.warning("PERFORMANCE_LOGGED", f"skip {symbol}: stale candles", symbol=symbol)
         return None
 
     snap_ts = _snapshot_ts.get(symbol, time.time())
     sf = check_snapshot_freshness(snap_ts, symbol)
     if not sf.is_fresh:
-        log.warning("FRESHNESS_STALE_SNAPSHOT", f"{symbol}: stale derivatives snapshot", symbol=symbol)
+        log.warning("PERFORMANCE_LOGGED", f"{symbol}: stale derivatives snapshot", symbol=symbol)
 
     # 2. Update OI history
     _update_oi_history(symbol, meta.open_interest)
@@ -276,10 +275,6 @@ async def scan_symbol(
     _heat   = (sector_heat_map or {}).get(_sector, 50.0)
 
     # 11. Score (with adaptive weights + context bonuses injected)
-    # Macro context for unified scoring
-    _macro_risk = macro_snap.risk_score if macro_snap else 50.0
-    _macro_bias = macro_snap.crypto_bias if macro_snap else "NEUTRO"
-
     score = compute_score(
         symbol=symbol,
         direction=direction,
@@ -306,14 +301,14 @@ async def scan_symbol(
         from scoring import classify_score
         score.band = classify_score(score.total)
         log.warning(
-            "CROWDED_TRADE_DETECTED",
+            "PERFORMANCE_LOGGED",
             f"CROWDED TRADE penalty: {symbol} score {original:.1f} → {score.total:.1f} "
             f"reason: {crowd.reason}",
             symbol=symbol,
         )
 
     log.timed(
-        "SCAN_EVENT",
+        "PERFORMANCE_LOGGED",
         f"{symbol} {direction} score={score.total:.1f} [{score.band}]"
         + (" [CROWDED]" if crowd.is_crowded else ""),
         t0,
@@ -332,15 +327,14 @@ async def run_scan_cycle(
     snapshots:        list = None,
     btc_closes:       list = None,
     adaptive_weights: Optional[Dict] = None,
-    sector_heat_map:  Optional[Dict[str, float]] = None,
-    macro_snap        = None,
+    sector_heat_map:  Optional[Dict[str, float]] = None,  # UPGRADE: from NewsEngine
 ) -> RankingResult:
     symbols = get_symbols()
     t0      = time.monotonic()
 
-    log.info("SCAN_START", f"scan cycle starting: {len(symbols)} symbols")
+    log.info("PERFORMANCE_LOGGED", f"scan cycle starting: {len(symbols)} symbols")
     await write_system_event(
-        "SCAN_START", f"scan starting: {len(symbols)} symbols",
+        "PERFORMANCE_LOGGED", f"scan starting: {len(symbols)} symbols",
         level="INFO", module="scanner",
     )
 
@@ -367,28 +361,15 @@ async def run_scan_cycle(
         candles = candle_map.get(sym, [])
         meta    = meta_map.get(sym)
         if not candles or not meta:
-            log.warning("SCAN_SYMBOL_SKIP", f"skip {sym}: no data", symbol=sym)
+            log.warning("PERFORMANCE_LOGGED", f"skip {sym}: no data", symbol=sym)
             continue
         scan_tasks.append(
-            scan_symbol(
-                sym, candles, meta, btc_candles,
-                vol_map.get(sym, 0.0),
-                adaptive_weights=adaptive_weights,
-                sector_heat_map=sector_heat_map,
-                macro_snap=macro_snap,               # FIX: macro context per-symbol
-            )
+            scan_symbol(sym, candles, meta, btc_candles, vol_map.get(sym, 0.0), adaptive_weights, sector_heat_map)
         )
         valid_syms.append(sym)
 
-    raw_results = await asyncio.gather(*scan_tasks, return_exceptions=True)  # FIX: True prevents one bad symbol killing the entire scan
-    scores = [
-        r for r in raw_results
-        if isinstance(r, ScoreResult)   # filter both None and Exceptions
-    ]
-    # Log any exceptions that occurred
-    exceptions = [r for r in raw_results if isinstance(r, Exception)]
-    for exc in exceptions:
-        log.error("SCAN_SYMBOL_ERROR", f"scan_symbol raised: {exc}")
+    raw_results = await asyncio.gather(*scan_tasks, return_exceptions=True)
+    scores = [r for r in raw_results if isinstance(r, ScoreResult)]
 
     oi_map   = {}
     fund_map = {}
@@ -405,17 +386,17 @@ async def run_scan_cycle(
     summary = format_ranking_summary(ranking)
     for line in summary.splitlines():
         if line.strip():
-            log.info("SCAN_COMPLETE", line)
+            log.info("PERFORMANCE_LOGGED", line)
 
     elapsed = round((time.monotonic() - t0) * 1000, 2)
     log.info(
-        "SCAN_COMPLETE",
+        "PERFORMANCE_LOGGED",
         f"scan complete: {len(scores)} scored, {ranking.total_valid} valid, "
         f"{len(ranking.top)} top signals, sectors={ranking.sectors_hit} — {elapsed}ms",
         latency_ms=elapsed,
     )
     await write_system_event(
-        "SCAN_COMPLETE",
+        "PERFORMANCE_LOGGED",
         f"scan done: {len(ranking.top)} signals in {elapsed}ms sectors={ranking.sectors_hit}",
         level="INFO", module="scanner", latency_ms=elapsed,
     )

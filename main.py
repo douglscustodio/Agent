@@ -154,7 +154,6 @@ async def job_scan_cycle() -> None:
             run_scan_cycle(
                 adaptive_weights=live_weights,
                 sector_heat_map=sector_heat_map,
-                macro_snap=ctx.macro.get_snapshot(),   # FIX: macro per-symbol
             ),
             timeout=25.0,
         )
@@ -293,7 +292,7 @@ _shutdown_event = asyncio.Event()
 
 
 def _handle_signal(sig) -> None:
-    log.warning("SYSTEM_SHUTDOWN", f"received {sig.name} — shutting down")
+    log.warning("SYSTEM_START", f"received {sig.name} — shutting down")
     _shutdown_event.set()
 
 
@@ -304,7 +303,8 @@ def _handle_signal(sig) -> None:
 async def main() -> None:
     log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
     ai_key = bool(os.getenv("GROQ_API_KEY"))
-    log.info("SYSTEM_START", f"IA Groq: {'habilitada' if ai_key else 'desabilitada — configure GROQ_API_KEY'}")
+    ai_status = "habilitada" if ai_key else "desabilitada — configure GROQ_API_KEY"
+    log.info("SYSTEM_START", f"IA Groq: {ai_status}")
     app_state["started_at"] = _now_iso()
 
     loop = asyncio.get_running_loop()
@@ -315,12 +315,11 @@ async def main() -> None:
     try:
         await init_db()
     except RuntimeError as exc:
-        log.critical("STARTUP_FAIL", f"DB startup failed: {exc}")
+        log.critical("SYSTEM_START", f"DB startup failed: {exc}")
         return
 
     # ── 2. Performance tracker ───────────────────────────────────────────
     await ctx.tracker.startup()
-    ctx.tracker.set_memory(ctx.memory)   # feedback loop: outcomes → memory engine
 
     # ── 3. Adaptive engine ───────────────────────────────────────────────
     await ctx.adaptive.startup()
@@ -338,6 +337,10 @@ async def main() -> None:
     # ── 5. Notifier ──────────────────────────────────────────────────────
     tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not tg_token:
+        log.warning("SYSTEM_START", "TELEGRAM_BOT_TOKEN não configurada — alertas Telegram desabilitados")
+    if not tg_chat_id:
+        log.warning("SYSTEM_START", "TELEGRAM_CHAT_ID não configurada — alertas Telegram desabilitados")
     log.info("SYSTEM_START", f"Telegram config — token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
     ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
     await ctx.notifier.startup()
@@ -373,18 +376,13 @@ async def main() -> None:
         "all subsystems running — scheduler active",
         level="INFO", module="main",
     )
-    # Make subsystem references available to health_server
-    app_state["macro_snap"]    = ctx.macro      # health_server reads .get_snapshot()
-    app_state["memory_engine"] = ctx.memory
-    app_state["ai_enabled"]    = ctx.ai.enabled
-
     log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
 
     # ── 9. Run until signal ──────────────────────────────────────────────
     await _shutdown_event.wait()
 
     # ── 10. Graceful teardown ────────────────────────────────────────────
-    log.info("SYSTEM_SHUTDOWN", "initiating graceful shutdown")
+    log.info("SYSTEM_START", "initiating graceful shutdown")
 
     await ctx.notifier.send_system_alert("🔴 *Crypto Monitor offline*\nShutting down.")
 
@@ -399,10 +397,10 @@ async def main() -> None:
     await close_db()
 
     await write_system_event(
-        "SYSTEM_SHUTDOWN", "shutdown complete",
+        "SYSTEM_START", "shutdown complete",
         level="INFO", module="main",
     )
-    log.info("SYSTEM_SHUTDOWN", "=== shutdown complete ===")
+    log.info("SYSTEM_START", "=== shutdown complete ===")
 
 
 # ---------------------------------------------------------------------------

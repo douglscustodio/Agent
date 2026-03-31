@@ -13,9 +13,6 @@ from typing import Dict, List, Optional, Tuple
 
 from database import get_pool, write_system_event
 from logger import get_logger
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from memory_engine import MemoryEngine
 
 log = get_logger("performance_tracker")
 
@@ -158,14 +155,6 @@ class PerformanceTracker:
     def __init__(self) -> None:
         self._pending: Dict[str, PendingAlert] = {}   # alert_id → PendingAlert
 
-    def __init__(self) -> None:
-        self._pending: Dict[str, PendingAlert] = {}
-        self._memory: "MemoryEngine | None" = None
-
-    def set_memory(self, memory: "MemoryEngine") -> None:
-        """Inject memory engine for feedback loop (called from main.py startup)."""
-        self._memory = memory
-
     async def startup(self) -> None:
         await ensure_performance_schema()
         log.info("SYSTEM_READY", "performance tracker ready")
@@ -196,7 +185,7 @@ class PerformanceTracker:
         await self._persist_pending(pending)
 
         log.info(
-            "PERF_ALERT_REGISTERED",
+            "PERFORMANCE_LOGGED",
             f"registered alert for tracking: {symbol} {direction} entry={entry_price:.4f}",
             symbol=symbol,
             direction=direction,
@@ -228,7 +217,7 @@ class PerformanceTracker:
                 current_price = await get_current_price(pending.symbol)
                 if current_price is None:
                     log.warning(
-                        "PERF_TRACK",
+                        "PERFORMANCE_LOGGED",
                         f"no price for {pending.symbol} at {horizon}h check",
                         symbol=pending.symbol, alert_id=alert_id,
                     )
@@ -253,32 +242,9 @@ class PerformanceTracker:
                 )
                 await self._persist_record(record)
 
-                # ── Feedback loop: teach memory engine from outcome ──────
-                if self._memory and horizon == 24:   # use 24h as final outcome
-                    try:
-                        from sector_rotation import classify_symbol
-                        from btc_regime import Regime
-                        await self._memory.record_outcome(
-                            symbol=pending.symbol,
-                            direction=pending.direction,
-                            score=pending.score,
-                            regime=getattr(pending, "regime_used", "UNKNOWN"),
-                            sector=classify_symbol(pending.symbol),
-                            funding_bias=getattr(pending, "funding_bias", "NEUTRAL"),
-                            oi_trend=getattr(pending, "oi_trend", "STABLE"),
-                            macro_risk=getattr(pending, "macro_risk", 50.0),
-                            outcome=outcome.value,
-                            pnl_pct=pnl_pct * 100,
-                            horizon_h=horizon,
-                        )
-                    except Exception as exc:
-                        log.warning("MEMORY_FEEDBACK_ERROR",
-                                    f"memory record_outcome failed: {exc}",
-                                    symbol=pending.symbol)
-
                 outcome_emoji = "✅" if outcome == Outcome.TP1 else ("❌" if outcome == Outcome.SL else "➖")
                 log.info(
-                    "PERF_OUTCOME_LOGGED",
+                    "PERFORMANCE_LOGGED",
                     f"{outcome_emoji} {pending.symbol} {pending.direction} "
                     f"{horizon}h: {outcome} pnl={pnl_pct*100:.2f}%",
                     symbol=pending.symbol,
@@ -288,7 +254,7 @@ class PerformanceTracker:
                     alert_id=alert_id,
                 )
                 await write_system_event(
-                    "PERF_OUTCOME_LOGGED",
+                    "PERFORMANCE_LOGGED",
                     f"{pending.symbol} {pending.direction} {horizon}h outcome: {outcome} ({pnl_pct*100:.2f}%)",
                     level="INFO", module="performance_tracker",
                     symbol=pending.symbol, direction=pending.direction,

@@ -15,8 +15,6 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
-from retry_utils import retry_async
-
 from database import write_system_event
 from logger import get_logger
 
@@ -291,7 +289,7 @@ class NewsEngine:
             self._cache    = articles
             self._cache_ts = now
             log.info(
-                "NEWS_FETCH_COMPLETE",
+                "PERFORMANCE_LOGGED",
                 f"news fetch complete: {len(articles)} articles from {articles[0].source if articles else 'none'}",
             )
 
@@ -360,18 +358,12 @@ class NewsEngine:
             "filter":     "hot",
             "kind":       "news",
         }
-        try:
-            data = await retry_async(
-                _fetch_json, session, CRYPTOPANIC_URL, params,
-                max_attempts=2, base_delay=1.0, label="cryptopanic",
-            )
-        except Exception:
-            data = None
+        data = await _fetch_json(session, CRYPTOPANIC_URL, params)
         if data is None:
             return []
         articles = _parse_cryptopanic(data)
         if articles:
-            log.info("NEWS_FETCH_COMPLETE", f"CryptoPanic: {len(articles)} articles fetched")
+            log.info("PERFORMANCE_LOGGED", f"CryptoPanic: {len(articles)} articles fetched")
         return articles
 
     async def _fetch_rss(
@@ -484,7 +476,7 @@ class NewsEngine:
             heat_scores[sec] = round(max(0.0, min(100.0, heat)), 2)
 
         log.debug(
-            "NEWS_FETCH_COMPLETE",
+            "PERFORMANCE_LOGGED",
             f"sector heat scores: {heat_scores}",
         )
         return heat_scores

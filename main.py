@@ -94,8 +94,13 @@ async def job_btc_regime() -> None:
     lows   = [c.low   for c in candles]
     closes = [c.close for c in candles]
     regime = compute_adx(highs, lows, closes)
+    
     ctx.latest_regime  = regime
     ctx.last_regime_ts = _now_iso()
+    ctx.btc_closes = closes[-20:]
+    ctx.btc_highs = highs[-20:]
+    ctx.btc_lows = lows[-20:]
+    
     log.info(
         "BTC_REGIME_UPDATED",
         f"BTC regime: {regime.regime} ADX={regime.adx:.2f} dir={regime.trend_direction}",
@@ -245,10 +250,10 @@ async def job_market_report() -> None:
 async def job_btc_spike() -> None:
     """Check BTC for sudden moves every 5 min."""
     await ctx.notifier.check_btc_spike()
-    if _chatbot and _chatbot._alert_chat_id:
+    if _chatbot and _chatbot._alert_chat_id and ctx.btc_closes and len(ctx.btc_closes) >= 2:
         btc_price = _get_price("BTC")
-        if btc_price and ctx.btc_closes:
-            prev_price = ctx.btc_closes[-1] if ctx.btc_closes else btc_price
+        if btc_price > 0:
+            prev_price = ctx.btc_closes[0]
             change_pct = ((btc_price - prev_price) / prev_price) * 100
             if abs(change_pct) >= 3:
                 direction = "SUBIU" if change_pct > 0 else "CAIU"

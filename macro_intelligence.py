@@ -15,6 +15,7 @@ import aiohttp
 
 from database import write_system_event
 from logger import get_logger
+from data_quality import update_quality
 
 log = get_logger("macro_intelligence")
 
@@ -328,9 +329,16 @@ class MacroEngine:
                 "btc_etf": _fetch_yf(session, MARKET_SYMBOLS["BTC_ETF"], "ETF BTC (IBIT)"),
             }
             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            success_count = 0
             for key, result in zip(tasks.keys(), results):
                 if not isinstance(result, Exception) and result:
                     setattr(snap, key, result)
+                    success_count += 1
+
+            update_quality(
+                macro_fetched_at=time.time(),
+                macro_api_available=(success_count > 0),
+            )
 
             # Fetch macro news
             try:

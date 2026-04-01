@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 import aiohttp
 
 from logger import get_logger
+from data_quality import update_quality
 
 log = get_logger("ai_analyst")
 
@@ -58,11 +59,11 @@ class AIAnalysis:
         return cls(
             symbol=symbol,
             direction=direction,
-            approved=True,
-            confidence=50,
-            reason=reason or "Análise de IA indisponível — sinal quantitativo aprovado",
-            risk_note="Gerencie o risco com stop loss",
-            context_tags=[],
+            approved=False,
+            confidence=40,
+            reason=reason or "Análise de IA indisponível — sinal requer revisão manual",
+            risk_note="Sem validação de IA - gerencie o risco com stop loss",
+            context_tags=["sem_ia"],
             used_ai=False,
         )
 
@@ -176,6 +177,7 @@ class AIAnalyst:
     def __init__(self) -> None:
         self._api_key = os.getenv("GROQ_API_KEY", "")
         self._enabled = bool(self._api_key)
+        update_quality(ai_available=self._enabled)
         if self._enabled:
             log.info("SYSTEM_READY", f"AI Analyst pronto — Groq {AI_MODEL}")
         else:

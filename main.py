@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from adaptive import AdaptiveEngine
+from chatbot import JarvisChatbot
 from macro_intelligence import MacroEngine
 from memory_engine import MemoryEngine
 from btc_regime import RegimeResult
@@ -378,7 +379,42 @@ async def main() -> None:
     )
     log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
 
-    # ── 9. Run until signal ──────────────────────────────────────────────
+    # ── 9. Chatbot (Telegram) ───────────────────────────────────────────
+    chatbot = None
+    if tg_token and tg_chat_id:
+        chatbot = JarvisChatbot(tg_token)
+        chatbot.set_system_refs(
+            scanner=ctx,
+            news_engine=ctx.news_engine,
+            macro_engine=ctx.macro,
+            tracker=ctx.tracker,
+            last_ranking=ctx.latest_ranking,
+        )
+        log.info("CHATBOT_READY", "chatbot Telegram ativo — comandos disponíveis")
+
+    # ── 10. Message handling loop ────────────────────────────────────────
+    async def chat_loop():
+        if not chatbot:
+            return
+        while not _shutdown_event.is_set():
+            try:
+                message = await asyncio.wait_for(chatbot.poll(), timeout=35)
+                if message:
+                    from scanner import run_scan_cycle as _scan
+                    ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
+                    chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
+                    response = await chatbot.handle_message(message, tg_chat_id)
+                    if response:
+                        await chatbot._send_message(tg_chat_id, response)
+            except asyncio.TimeoutError:
+                pass
+            except Exception as exc:
+                log.warning("CHATBOT_LOOP", f"chat error: {exc}")
+                await asyncio.sleep(5)
+
+    chat_task = asyncio.create_task(chat_loop()) if chatbot else None
+
+    # ── 11. Run until signal ─────────────────────────────────────────────
     await _shutdown_event.wait()
 
     # ── 10. Graceful teardown ────────────────────────────────────────────
@@ -393,6 +429,13 @@ async def main() -> None:
         await ws_task
     except asyncio.CancelledError:
         pass
+
+    if chat_task:
+        chat_task.cancel()
+        try:
+            await chat_task
+        except asyncio.CancelledError:
+            pass
 
     await close_db()
 

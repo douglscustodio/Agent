@@ -32,6 +32,7 @@ import aiohttp
 from ai_analyst import AIAnalyst, AIAnalysis
 from alerts_dedup import AlertDedupStore
 from database import write_system_event
+from data_quality import get_current_quality
 from logger import get_logger
 from news_engine import NewsContext
 from ranking import RankedSignal, RankingResult
@@ -93,6 +94,20 @@ def _band_label(band) -> str:
     if "HIGH_CONVICTION" in str(band):
         return "🔥 ALTA CONVICÇÃO"
     return "✅ VÁLIDO"
+
+
+def _format_quality_indicator() -> str:
+    """Retorna indicador de qualidade dos dados para alertas."""
+    quality = get_current_quality()
+    lines = []
+    
+    if quality.warnings:
+        lines.append("*⚠️ QUALIDADE DOS DADOS:*")
+        for warning in quality.warnings[:3]:
+            lines.append(warning)
+        lines.append("")
+    
+    return "\n".join(lines)
 
 
 def _sentiment_pt(s: str) -> str:
@@ -390,7 +405,6 @@ def _build_signal_message(
         lines.append("• Arrisque no máximo 1–2% do capital por operação")
         lines.append("• Respeite o Stop Loss — ele protege sua conta")
         lines.append("• Este é um sinal, não uma garantia de lucro")
-        lines.append("")
 
         sl_val = sl if 'sl' in dir() and price > 0 else 0
         tp1_val = tp1 if 'tp1' in dir() and price > 0 else 0
@@ -403,6 +417,7 @@ def _build_signal_message(
         })
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(_format_quality_indicator())
     lines.append("_Jarvis AI Trading Monitor_")
     return "\n".join(lines)
 

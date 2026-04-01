@@ -17,6 +17,7 @@ import aiohttp
 
 from database import write_system_event
 from logger import get_logger
+from data_quality import update_quality
 
 log = get_logger("news_engine")
 
@@ -283,11 +284,13 @@ class NewsEngine:
         if not articles and self._cache:
             log.warning("NEWS_FALLBACK_USED", "all news sources failed — using stale cache")
             await write_system_event("NEWS_FALLBACK_USED", "all sources failed, using stale cache", level="WARNING", module="news_engine")
+            update_quality(news_api_available=False)
             return self._cache
 
         if articles:
             self._cache    = articles
             self._cache_ts = now
+            update_quality(news_fetched_at=now, news_api_available=True)
             log.info(
                 "PERFORMANCE_LOGGED",
                 f"news fetch complete: {len(articles)} articles from {articles[0].source if articles else 'none'}",

@@ -42,6 +42,7 @@ from hyperliquid_client import (
 from logger import get_logger
 from ranking import rank_signals, format_ranking_summary, RankingResult
 from scoring import compute_score, ScoreResult
+from data_quality import update_quality, get_current_quality, log_quality_warnings
 
 log = get_logger("scanner")
 
@@ -342,6 +343,8 @@ async def run_scan_cycle(
     candle_map = await fetch_all_candles(all_syms, interval=CANDLE_INTERVAL, count=CANDLE_COUNT)
     btc_candles = candle_map.get("BTC", [])
 
+    hyperliquid_ok = bool(candle_map) and len(candle_map) > 0
+
     async with aiohttp.ClientSession() as session:
         meta_map = await fetch_all_metas(session)
 
@@ -354,6 +357,16 @@ async def run_scan_cycle(
 
     # UPGRADE: bounded cache update
     _update_meta_cache(meta_map)
+
+    # UPGRADE: track data quality
+    from websocket_client import ws_price_cache
+    update_quality(
+        market_fetched_at=time.time(),
+        hyperliquid_available=hyperliquid_ok,
+        ws_connected=bool(ws_price_cache),
+        symbols_requested=len(symbols),
+        symbols_with_data=sum(1 for s in symbols if s in candle_map and candle_map[s]),
+    )
 
     scan_tasks = []
     valid_syms = []
@@ -389,6 +402,7 @@ async def run_scan_cycle(
             log.info("PERFORMANCE_LOGGED", line)
 
     elapsed = round((time.monotonic() - t0) * 1000, 2)
+    quality = get_current_quality()
     log.info(
         "PERFORMANCE_LOGGED",
         f"scan complete: {len(scores)} scored, {ranking.total_valid} valid, "
@@ -400,6 +414,8 @@ async def run_scan_cycle(
         f"scan done: {len(ranking.top)} signals in {elapsed}ms sectors={ranking.sectors_hit}",
         level="INFO", module="scanner", latency_ms=elapsed,
     )
+
+    log_quality_warnings()
 
     return ranking
 

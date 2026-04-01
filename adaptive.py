@@ -31,10 +31,11 @@ log = get_logger("adaptive")
 # Config
 # ---------------------------------------------------------------------------
 
-MIN_SAMPLES_TO_ADAPT    = 20
-MAX_WEIGHT_DELTA        = 0.05
+MIN_SAMPLES_TO_ADAPT    = 50   # ANTI-OVERFIT: requer mais trades antes de adaptar
+MAX_WEIGHT_DELTA        = 0.03  # ANTI-OVERFIT: mudanças menores por ciclo
 WEIGHT_MIN              = 0.05
 WEIGHT_MAX              = 0.35
+WEIGHT_SOFT_FLOOR      = 0.15   # ANTI-OVERFIT: nunca reduzir abaixo disso
 ADAPT_INTERVAL_H        = 24
 
 # UPGRADE: per-component feedback config

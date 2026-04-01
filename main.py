@@ -28,11 +28,13 @@ from memory_engine import MemoryEngine
 from btc_regime import RegimeResult
 from config import config
 from database import init_db, close_db, write_system_event, flush_event_buffer
+from data_quality import get_current_quality
 from health_server import run_health_server, app_state
 from logger import get_logger
 from news_engine import NewsEngine, NewsArticle, NewsContext
 from notifier import Notifier
 from performance_tracker import PerformanceTracker
+from portfolio_risk import PortfolioRiskManager
 from ranking import RankingResult
 from scanner import run_scan_cycle, get_symbols
 from scheduler import build_scheduler
@@ -41,6 +43,7 @@ from websocket_client import run_websocket_client, ws_state
 
 log = get_logger("main")
 
+_state_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Global shared state — all loops read/write this
@@ -56,6 +59,7 @@ class AppContext:
         self.adaptive:             AdaptiveEngine       = AdaptiveEngine()
         self.macro:                MacroEngine          = MacroEngine()
         self.memory:               MemoryEngine         = MemoryEngine()
+        self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
 
         # Live data caches (populated by WS + scan loops)
         self.latest_articles:      List[NewsArticle]    = []
@@ -133,13 +137,16 @@ async def job_scan_cycle() -> None:
     """Full scan + ranking + notify every 5 min."""
     t0 = time.monotonic()
 
-    # Guard: skip high-confidence trades if WS is not connected
     current_ws_status = ws_state.get("status", "DISCONNECTED")
     if current_ws_status != "CONNECTED":
         log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan cycle")
         return
 
-    # Get adaptive weights (learned from performance history)
+    quality = get_current_quality()
+    if quality.should_block_signals:
+        log.error("SCAN_SKIP", f"Data quality blocked: {quality.quality_label}")
+        return
+
     live_weights = ctx.adaptive.get_weights()
 
     # Compute sector heat scores from latest news
@@ -191,6 +198,21 @@ async def job_scan_cycle() -> None:
 
     # Get macro snapshot and memory insights
     macro_snap = ctx.macro.get_snapshot()
+
+    # PORTFOLIO RISK: Filter signals through risk manager
+    approved_signals, rejected_signals = ctx.risk_manager.filter_signals(
+        ranking.top, macro_snap
+    )
+    
+    # Update ranking with approved signals only
+    if len(approved_signals) < len(ranking.top):
+        log.warning("SCAN_RISK", f"Risk manager blocked {len(ranking.top) - len(approved_signals)} signals")
+        ranking.top = approved_signals
+        ranking.total_valid = len(approved_signals)
+
+    if not ranking.top:
+        log.info("SCAN_COMPLETE", "No signals after risk filtering")
+        return
 
     # Dispatch alerts
     await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)

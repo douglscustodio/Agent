@@ -186,6 +186,25 @@ class DataQuality:
         """Sinais devem ser bloqueados?"""
         return self.quality_score < QUALITY_THRESHOLD or not self.hyperliquid_available
     
+    def validate_or_fail(self) -> None:
+        """
+        Valida dados e LANÇA ERRO se inválidos.
+        NUNCA retorna dados simulados em silêncio.
+        """
+        if not self.hyperliquid_available:
+            raise RuntimeError("BLOCKED: Hyperliquid API unavailable - no market data")
+        
+        if self.market_age_minutes > 15:
+            raise RuntimeError(f"BLOCKED: Market data stale ({self.market_age_minutes:.0f}min)")
+        
+        if self.symbols_requested > 0:
+            coverage = self.symbols_with_data / self.symbols_requested
+            if coverage < 0.5:
+                raise RuntimeError(f"BLOCKED: Only {coverage:.0%} symbols with data")
+        
+        if self.quality_score < 0.4:
+            raise RuntimeError(f"BLOCKED: Data quality too low ({self.quality_score:.0%})")
+    
     def to_dict(self) -> dict:
         """Serializa para dict (para logs/debug)."""
         return {

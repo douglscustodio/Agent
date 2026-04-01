@@ -197,16 +197,20 @@ async def job_scan_cycle() -> None:
 
     # PROATIVO: Enviar alertas via chatbot se tiver sinais
     if ranking.top and _chatbot:
+        log.info("CHATBOT_ALERT", f"sending proactive alerts for {len(ranking.top)} signals")
         for sig in ranking.top[:2]:
             reason = ""
             if "relative_strength" in sig.components:
                 reason = f"Força relativa: {sig.components['relative_strength']:.0f}"
-            await _chatbot.alert_signal(
-                symbol=sig.symbol,
-                direction=sig.direction,
-                score=sig.score,
-                reason=reason,
-            )
+            try:
+                await _chatbot.alert_signal(
+                    symbol=sig.symbol,
+                    direction=sig.direction,
+                    score=sig.score,
+                    reason=reason,
+                )
+            except Exception as exc:
+                log.error("CHATBOT_ALERT", f"failed to send signal alert: {exc}")
 
     # Register sent alerts for performance tracking
     for sig in ranking.top:
@@ -444,17 +448,26 @@ async def main() -> None:
             try:
                 result = await asyncio.wait_for(_chatbot.poll(), timeout=40)
                 if result:
-                    text = result.get("text", "")
+                    text = result.get("text", "") or ""
                     user_chat_id = result.get("chat_id", "")
-                    if text and user_chat_id:
-                        log.info("CHATBOT_MSG", f"received: {text[:50]}")
+                    non_text = result.get("non_text", False)
+                    
+                    if not user_chat_id:
+                        continue
+                    
+                    log.info("CHATBOT_MSG", f"text='{text}' non_text={non_text}")
+                    
+                    if non_text:
+                        response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver o que posso fazer!"
+                    else:
                         from scanner import run_scan_cycle as _scan
                         ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
                         _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
                         response = await _chatbot.handle_message(text, user_chat_id)
-                        if response:
-                            sent = await _chatbot._send_message(user_chat_id, response)
-                            log.info("CHATBOT_SENT", f"response sent: {sent}")
+                    
+                    if response:
+                        sent = await _chatbot._send_message(user_chat_id, response)
+                        log.info("CHATBOT_SENT", f"sent={sent}")
             except asyncio.TimeoutError:
                 pass
             except Exception as exc:

@@ -68,6 +68,10 @@ class JarvisChatbot:
         self._system_refs.update(refs)
 
     async def _send_message(self, chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+        if not chat_id:
+            log.error("CHATBOT_ERROR", "send_message called with empty chat_id")
+            return False
+        
         url = f"{self._api_base}/sendMessage"
         payload = {
             "chat_id": chat_id,
@@ -78,8 +82,10 @@ class JarvisChatbot:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
+                        log.info("CHATBOT_SENT", f"message sent to {chat_id}: {text[:50]}...")
                         return True
-                    log.error("CHATBOT_ERROR", f"send failed: {resp.status}")
+                    body = await resp.text()
+                    log.error("CHATBOT_ERROR", f"send failed: {resp.status} - {body[:100]}")
                     return False
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"send failed: {exc}")
@@ -87,7 +93,9 @@ class JarvisChatbot:
 
     async def send_alert(self, text: str) -> bool:
         if not self._alert_chat_id:
+            log.warning("CHATBOT_ALERT", "send_alert called but _alert_chat_id is None")
             return False
+        log.info("CHATBOT_ALERT", f"sending alert: {text[:50]}...")
         return await self._send_message(self._alert_chat_id, text)
 
     def set_alert_chat_id(self, chat_id: str) -> None:
@@ -96,10 +104,12 @@ class JarvisChatbot:
 
     async def alert_signal(self, symbol: str, direction: str, score: float, reason: str = "") -> None:
         if not self._alert_chat_id:
+            log.warning("CHATBOT_ALERT", f"Cannot send signal alert - no chat_id set")
             return
         
         key = f"{symbol}:{direction}"
         if key in self._signal_alerted_today:
+            log.info("CHATBOT_ALERT", f"signal {key} already alerted today, skipping")
             return
         
         emoji = "📈" if direction == "LONG" else "📉"
@@ -113,8 +123,8 @@ class JarvisChatbot:
         msg += "\nDigite /sinais para mais detalhes"
         
         self._signal_alerted_today.add(key)
+        log.info("CHATBOT_ALERT", f"Sending signal alert: {symbol} {direction} score={score}")
         await self.send_alert(msg)
-        log.info("CHATBOT_ALERT", f"signal alert sent: {symbol} {direction}")
 
     def reset_daily_alerts(self) -> None:
         self._signal_alerted_today.clear()
@@ -191,8 +201,16 @@ class JarvisChatbot:
                     
                     self._last_update_id = update_id
                     message = update.get("message", {})
-                    text = message.get("text", "")
                     chat_id = str(message.get("chat", {}).get("id", ""))
+                    
+                    text = message.get("text", "")
+                    photo = message.get("photo")
+                    voice = message.get("voice")
+                    video = message.get("video")
+                    document = message.get("document")
+                    
+                    if photo or voice or video or document:
+                        return {"text": "", "chat_id": chat_id, "non_text": True}
                     
                     return {"text": text, "chat_id": chat_id}
         except asyncio.TimeoutError:
@@ -201,7 +219,10 @@ class JarvisChatbot:
             log.warning("CHATBOT_POLL", f"poll error: {exc}")
             return None
 
-    async def handle_message(self, text: str, chat_id: str) -> str:
+    async def handle_message(self, text: str, chat_id: str, non_text: bool = False) -> str:
+        if non_text:
+            return "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver o que posso fazer!"
+        
         if not text:
             return ""
         

@@ -54,6 +54,7 @@ class JarvisChatbot:
             "/macro": self._cmd_macro,
             "/performance": self._cmd_performance,
             "/scan": self._cmd_scan,
+            "/risk": self._cmd_risk,
             "/ai": self._cmd_ai,
         }
         
@@ -62,6 +63,7 @@ class JarvisChatbot:
             "💡 Use /ai + sua pergunta para conversar comigo",
             "💡 /news mostra as últimas notícias do mercado",
             "💡 /status verifica se tudo está funcionando",
+            "💡 /risk mostra status de proteção de risco",
         ]
 
     def set_system_refs(self, **refs) -> None:
@@ -503,6 +505,40 @@ class JarvisChatbot:
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"scan error: {exc}")
             return f"⚡ *Scan*\n\nErro ao executar scan: {exc}"
+
+    async def _cmd_risk(self, chat_id: str, args: str) -> str:
+        risk_manager = self._system_refs.get("risk_manager")
+        kill_switch = self._system_refs.get("kill_switch")
+        
+        lines = [
+            "🛡️ *Status de Risco*",
+            f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
+            "",
+        ]
+        
+        if kill_switch:
+            status = kill_switch.get_status()
+            if status.is_active:
+                lines.append("🛑 *KILL SWITCH ATIVO*")
+                lines.append(f"Motivo: {status.reason}")
+            else:
+                lines.append("✅ *Kill Switch: OFF*")
+            
+            lines.append(f"• P&L Diário: `{status.daily_pnl_pct*100:+.2f}%`")
+            lines.append(f"• Perdas Consecutivas: {status.consecutive_losses}")
+            lines.append(f"• Trades Hoje: {status.trades_today}")
+            lines.append(f"• Pode Operar: {'✅ SIM' if status.block_new_trades else '❌ NÃO'}")
+            lines.append("")
+        
+        if risk_manager:
+            r_status = risk_manager.get_status()
+            lines.append("*📊 Portfolio Risk:*")
+            lines.append(f"• Posições Abertas: {r_status['open_positions']}/{r_status['max_allowed']}")
+            lines.append(f"• Qualidade Dados: {'✅ OK' if r_status['data_quality_ok'] else '❌ INVÁLIDOS'}")
+            lines.append("")
+        
+        lines.append("_Jarvis AI Trading Monitor_")
+        return "\n".join(lines)
 
     async def _cmd_ai(self, chat_id: str, args: str) -> str:
         api_key = os.getenv("GROQ_API_KEY", "")

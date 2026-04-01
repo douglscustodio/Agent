@@ -396,6 +396,17 @@ async def run_scan_cycle(
 
     ranking = rank_signals(scores, max_signals=3, oi_accel_map=oi_map, funding_map=fund_map)
 
+    if not ranking.top:
+        log.info("NO_TRADE", "No signals above threshold - market conditions not favorable")
+        return ranking
+
+    avg_score = sum(s.score for s in ranking.top) / len(ranking.top) if ranking.top else 0
+    if avg_score < 45:
+        log.warning("NO_TRADE", f"Average score {avg_score:.0f} below minimum - skipping signals")
+        ranking.top = []
+        ranking.total_valid = 0
+        return ranking
+
     summary = format_ranking_summary(ranking)
     for line in summary.splitlines():
         if line.strip():

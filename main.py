@@ -36,6 +36,7 @@ from notifier import Notifier
 from performance_tracker import PerformanceTracker
 from portfolio_risk import PortfolioRiskManager
 from ranking import RankingResult
+from kill_switch import KillSwitch
 from scanner import run_scan_cycle, get_symbols
 from scheduler import build_scheduler
 from sector_rotation import compute_sector_rotation
@@ -60,6 +61,7 @@ class AppContext:
         self.macro:                MacroEngine          = MacroEngine()
         self.memory:               MemoryEngine         = MemoryEngine()
         self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
+        self.kill_switch:           KillSwitch          = KillSwitch()
 
         # Live data caches (populated by WS + scan loops)
         self.latest_articles:      List[NewsArticle]    = []
@@ -145,6 +147,13 @@ async def job_scan_cycle() -> None:
     quality = get_current_quality()
     if quality.should_block_signals:
         log.error("SCAN_SKIP", f"Data quality blocked: {quality.quality_label}")
+        return
+
+    if not ctx.kill_switch.can_trade():
+        status = ctx.kill_switch.get_status()
+        log.critical("KILL_SWITCH", f"Trading blocked: {status.reason}")
+        if _chatbot and _chatbot._alert_chat_id:
+            await _chatbot.send_alert(f"🛑 *KILL SWITCH ATIVO*\n\n{status.reason}\n\nTrades bloqueados até reset.")
         return
 
     live_weights = ctx.adaptive.get_weights()
@@ -452,49 +461,63 @@ async def main() -> None:
             news_engine=ctx.news_engine,
             macro_engine=ctx.macro,
             tracker=ctx.tracker,
+            risk_manager=ctx.risk_manager,
+            kill_switch=ctx.kill_switch,
             last_ranking=ctx.latest_ranking,
         )
-        log.info("CHATBOT_READY", "chatbot Telegram ativo — comandos disponíveis")
+        log.info("CHATBOT_READY", f"chatbot init - token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
         
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         welcome = await _chatbot.handle_message("/start", tg_chat_id)
-        await _chatbot._send_message(tg_chat_id, welcome)
-        log.info("CHATBOT_WELCOME", "welcome message sent")
+        log.info("CHATBOT_WELCOME", f"sending welcome: {len(welcome)} chars")
+        sent = await _chatbot._send_message(tg_chat_id, welcome)
+        log.info("CHATBOT_INIT", f"welcome sent: {sent}")
 
     # ── 10. Message handling loop ────────────────────────────────────────
     async def chat_loop():
         if not _chatbot:
+            log.warning("CHATBOT_LOOP", "no chatbot configured")
             return
-        log.info("CHATBOT_LOOP", "chat loop started")
+        log.info("CHATBOT_LOOP", "chat loop started - waiting for messages")
+        poll_count = 0
         while not _shutdown_event.is_set():
             try:
-                result = await asyncio.wait_for(_chatbot.poll(), timeout=40)
-                if result:
-                    text = result.get("text", "") or ""
-                    user_chat_id = result.get("chat_id", "")
-                    non_text = result.get("non_text", False)
+                poll_count += 1
+                if poll_count % 10 == 0:
+                    log.debug("CHATBOT_POLL", f"still polling... count={poll_count}")
+                
+                result = await asyncio.wait_for(_chatbot.poll(), timeout=35)
+                
+                if result is None:
+                    continue
+                
+                text = result.get("text", "")
+                user_chat_id = result.get("chat_id", "")
+                non_text = result.get("non_text", False)
+                
+                if not user_chat_id:
+                    log.warning("CHATBOT_MSG", "no chat_id in result")
+                    continue
+                
+                log.info("CHATBOT_MSG", f"user={user_chat_id} text='{text[:30]}...' non_text={non_text}")
+                
+                if non_text:
+                    response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver comandos."
+                else:
+                    from scanner import run_scan_cycle as _scan
+                    ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
+                    _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
+                    response = await _chatbot.handle_message(text, user_chat_id)
+                
+                if response:
+                    sent = await _chatbot._send_message(user_chat_id, response)
+                    log.info("CHATBOT_RESPONSE", f"sent={sent} to {user_chat_id}")
                     
-                    if not user_chat_id:
-                        continue
-                    
-                    log.info("CHATBOT_MSG", f"text='{text}' non_text={non_text}")
-                    
-                    if non_text:
-                        response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver o que posso fazer!"
-                    else:
-                        from scanner import run_scan_cycle as _scan
-                        ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
-                        _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
-                        response = await _chatbot.handle_message(text, user_chat_id)
-                    
-                    if response:
-                        sent = await _chatbot._send_message(user_chat_id, response)
-                        log.info("CHATBOT_SENT", f"sent={sent}")
             except asyncio.TimeoutError:
-                pass
+                log.debug("CHATBOT_POLL", "timeout - no messages, continuing")
             except Exception as exc:
-                log.error("CHATBOT_LOOP", f"chat error: {exc}")
-                await asyncio.sleep(2)
+                log.error("CHATBOT_ERROR", f"error: {exc}")
+                await asyncio.sleep(5)
 
     chat_task = asyncio.create_task(chat_loop()) if _chatbot else None
 

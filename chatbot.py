@@ -42,6 +42,8 @@ class JarvisChatbot:
         self._last_update_id = 0
         self._system_refs: Dict[str, Any] = {}
         self._user_first_contact: Dict[str, bool] = {}
+        self._alert_chat_id: Optional[str] = None
+        self._signal_alerted_today: set = set()
         
         self._commands = {
             "/start": self._cmd_start,
@@ -82,6 +84,86 @@ class JarvisChatbot:
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"send failed: {exc}")
             return False
+
+    async def send_alert(self, text: str) -> bool:
+        if not self._alert_chat_id:
+            return False
+        return await self._send_message(self._alert_chat_id, text)
+
+    def set_alert_chat_id(self, chat_id: str) -> None:
+        self._alert_chat_id = chat_id
+        log.info("CHATBOT_CONFIG", f"alert chat_id set: {chat_id}")
+
+    async def alert_signal(self, symbol: str, direction: str, score: float, reason: str = "") -> None:
+        if not self._alert_chat_id:
+            return
+        
+        key = f"{symbol}:{direction}"
+        if key in self._signal_alerted_today:
+            return
+        
+        emoji = "📈" if direction == "LONG" else "📉"
+        msg = (
+            f"{emoji} *OPORTUNIDADE DETECTADA!*\n\n"
+            f"{symbol}/USDT — {direction}\n"
+            f"Score: `{score:.0f}/100`\n"
+        )
+        if reason:
+            msg += f"\n{reason}\n"
+        msg += "\nDigite /sinais para mais detalhes"
+        
+        self._signal_alerted_today.add(key)
+        await self.send_alert(msg)
+        log.info("CHATBOT_ALERT", f"signal alert sent: {symbol} {direction}")
+
+    def reset_daily_alerts(self) -> None:
+        self._signal_alerted_today.clear()
+
+    async def alert_btc_spike(self, direction: str, pct: float, price: float) -> None:
+        emoji = "🚀" if direction == "UP" else "💥"
+        msg = (
+            f"{emoji} *ALERTA BTC*\n\n"
+            f"BTC {direction} `{pct:+.1f}%`\n"
+            f"Preço: `${price:,.2f}`\n\n"
+            "Cuidado com volatilidade!"
+        )
+        await self.send_alert(msg)
+
+    async def alert_macro_risk(self, risk_score: float, event: str) -> None:
+        if risk_score >= 70:
+            emoji = "🔴"
+        elif risk_score >= 50:
+            emoji = "🟡"
+        else:
+            emoji = "🟢"
+        msg = (
+            f"{emoji} *ALERTA MACRO*\n\n"
+            f"Risco: {risk_score:.0f}/100\n"
+            f"Evento: {event[:100]}\n\n"
+            "Revise suas posições!"
+        )
+        await self.send_alert(msg)
+
+    async def alert_data_issue(self, issue: str) -> None:
+        msg = (
+            f"⚠️ *AVISO DO SISTEMA*\n\n"
+            f"{issue}\n\n"
+            "Dados podem estar desatualizados."
+        )
+        await self.send_alert(msg)
+
+    async def alert_daily_summary(self, stats: dict) -> None:
+        total = stats.get("total", 0)
+        win_rate = stats.get("win_rate", 0)
+        pnl = stats.get("avg_pnl", 0)
+        msg = (
+            "📊 *RESUMO DIÁRIO*\n\n"
+            f"Sinais enviados: {total}\n"
+            f"Taxa de acerto: {win_rate:.1f}%\n"
+            f"PnL médio: {pnl:+.2f}%\n\n"
+            "Keep going! 🚀"
+        )
+        await self.send_alert(msg)
 
     async def poll(self) -> Optional[Dict]:
         url = f"{self._api_base}/getUpdates"

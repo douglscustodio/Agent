@@ -70,6 +70,7 @@ class AppContext:
 
 
 ctx = AppContext()
+_chatbot: Optional[JarvisChatbot] = None
 
 
 def _now_iso() -> str:
@@ -189,6 +190,19 @@ async def job_scan_cycle() -> None:
     # Dispatch alerts
     await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)
 
+    # PROATIVO: Enviar alertas via chatbot se tiver sinais
+    if ranking.top and _chatbot:
+        for sig in ranking.top[:2]:
+            reason = ""
+            if "relative_strength" in sig.components:
+                reason = f"Força relativa: {sig.components['relative_strength']:.0f}"
+            await _chatbot.alert_signal(
+                symbol=sig.symbol,
+                direction=sig.direction,
+                score=sig.score,
+                reason=reason,
+            )
+
     # Register sent alerts for performance tracking
     for sig in ranking.top:
         price = _get_price(sig.symbol)
@@ -213,15 +227,13 @@ async def job_performance_checks() -> None:
 async def job_macro_refresh() -> None:
     """Refresh macro data every 30 min."""
     await ctx.macro.refresh()
-    # Check for high-impact macro events and alert
     snap = ctx.macro.get_snapshot()
     if snap:
         high_neg = [e for e in snap.events if e.impact == 'HIGH' and e.sentiment == 'negative']
-        if high_neg:
-            await ctx.notifier.send_system_alert(
-                f'\U0001f534 *ALERTA MACRO*\n'
-                f'Evento de alto impacto detectado:\n'
-                f'• {high_neg[0].title[:100]}'
+        if high_neg and _chatbot:
+            await _chatbot.alert_macro_risk(
+                risk_score=snap.risk_score,
+                event=high_neg[0].title[:100],
             )
 
 
@@ -233,11 +245,30 @@ async def job_market_report() -> None:
 async def job_btc_spike() -> None:
     """Check BTC for sudden moves every 5 min."""
     await ctx.notifier.check_btc_spike()
+    if _chatbot and _chatbot._alert_chat_id:
+        btc_price = _get_price("BTC")
+        if btc_price and ctx.btc_closes:
+            prev_price = ctx.btc_closes[-1] if ctx.btc_closes else btc_price
+            change_pct = ((btc_price - prev_price) / prev_price) * 100
+            if abs(change_pct) >= 3:
+                direction = "SUBIU" if change_pct > 0 else "CAIU"
+                await _chatbot.alert_btc_spike(
+                    direction=direction,
+                    pct=change_pct,
+                    price=btc_price,
+                )
 
 
 async def job_daily_summary() -> None:
     """Send daily summary at midnight UTC."""
     await ctx.notifier.send_daily_summary(tracker=ctx.tracker)
+    if _chatbot:
+        _chatbot.reset_daily_alerts()
+        try:
+            stats = await ctx.tracker.get_recent_stats(days=1)
+            await _chatbot.alert_daily_summary(stats)
+        except Exception:
+            pass
 
 
 async def job_adaptive_tune() -> None:
@@ -380,10 +411,12 @@ async def main() -> None:
     log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
 
     # ── 9. Chatbot (Telegram) ───────────────────────────────────────────
-    chatbot = None
+    global _chatbot
+    _chatbot = None
     if tg_token and tg_chat_id:
-        chatbot = JarvisChatbot(tg_token)
-        chatbot.set_system_refs(
+        _chatbot = JarvisChatbot(tg_token)
+        _chatbot.set_alert_chat_id(tg_chat_id)
+        _chatbot.set_system_refs(
             scanner_module=run_scan_cycle,
             news_engine=ctx.news_engine,
             macro_engine=ctx.macro,
@@ -393,18 +426,18 @@ async def main() -> None:
         log.info("CHATBOT_READY", "chatbot Telegram ativo — comandos disponíveis")
         
         await asyncio.sleep(3)
-        welcome = await chatbot.handle_message("/start", tg_chat_id)
-        await chatbot._send_message(tg_chat_id, welcome)
+        welcome = await _chatbot.handle_message("/start", tg_chat_id)
+        await _chatbot._send_message(tg_chat_id, welcome)
         log.info("CHATBOT_WELCOME", "welcome message sent")
 
     # ── 10. Message handling loop ────────────────────────────────────────
     async def chat_loop():
-        if not chatbot:
+        if not _chatbot:
             return
         log.info("CHATBOT_LOOP", "chat loop started")
         while not _shutdown_event.is_set():
             try:
-                result = await asyncio.wait_for(chatbot.poll(), timeout=40)
+                result = await asyncio.wait_for(_chatbot.poll(), timeout=40)
                 if result:
                     text = result.get("text", "")
                     user_chat_id = result.get("chat_id", "")
@@ -412,10 +445,10 @@ async def main() -> None:
                         log.info("CHATBOT_MSG", f"received: {text[:50]}")
                         from scanner import run_scan_cycle as _scan
                         ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
-                        chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
-                        response = await chatbot.handle_message(text, user_chat_id)
+                        _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
+                        response = await _chatbot.handle_message(text, user_chat_id)
                         if response:
-                            sent = await chatbot._send_message(user_chat_id, response)
+                            sent = await _chatbot._send_message(user_chat_id, response)
                             log.info("CHATBOT_SENT", f"response sent: {sent}")
             except asyncio.TimeoutError:
                 pass
@@ -423,7 +456,7 @@ async def main() -> None:
                 log.error("CHATBOT_LOOP", f"chat error: {exc}")
                 await asyncio.sleep(2)
 
-    chat_task = asyncio.create_task(chat_loop()) if chatbot else None
+    chat_task = asyncio.create_task(chat_loop()) if _chatbot else None
 
     # ── 11. Run until signal ─────────────────────────────────────────────
     await _shutdown_event.wait()

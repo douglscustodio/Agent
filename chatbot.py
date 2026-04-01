@@ -540,7 +540,7 @@ class JarvisChatbot:
             lines.append(f"• P&L Diário: `{status.daily_pnl_pct*100:+.2f}%`")
             lines.append(f"• Perdas Consecutivas: {status.consecutive_losses}")
             lines.append(f"• Trades Hoje: {status.trades_today}")
-            lines.append(f"• Pode Operar: {'✅ SIM' if status.block_new_trades else '❌ NÃO'}")
+            lines.append(f"• Pode Operar: {'✅ SIM' if not status.block_new_trades else '❌ NÃO'}")
             lines.append("")
         
         if risk_manager:

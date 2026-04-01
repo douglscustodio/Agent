@@ -41,7 +41,7 @@ from sector_rotation import get_sector_label
 
 log = get_logger("notifier")
 
-TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_API = "https://api.telegram.org/bot{token}"
 SEND_TIMEOUT = 10
 
 BTC_SPIKE_PCT     = 3.0
@@ -636,12 +636,12 @@ async def _send_telegram(token: str, chat_id: str, text: str) -> bool:
     if not token or not chat_id:
         log.warning("ALERT_SENT", "Telegram não configurado — TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID ausente")
         return False
-    url     = TELEGRAM_API.format(token=token)
+    url     = f"{TELEGRAM_API.format(token=token)}/sendMessage"
     payload = {
         "chat_id":    chat_id,
         "text":       text,
         "parse_mode": "Markdown",
-        "disable_web_page_preview": False,   # UPGRADE: links funcionam
+        "disable_web_page_preview": False,
     }
     try:
         async with aiohttp.ClientSession() as session:

@@ -180,6 +180,7 @@ class JarvisChatbot:
     async def poll(self) -> Optional[Dict]:
         url = f"{self._api_base}/getUpdates"
         params = {
+            "offset": self._last_update_id + 1,
             "timeout": 30,
             "allowed_updates": "message",
         }
@@ -189,32 +190,44 @@ class JarvisChatbot:
                     if resp.status != 200:
                         log.warning("CHATBOT_POLL", f"poll HTTP error: {resp.status}")
                         return None
+                    
                     data = await resp.json()
+                    if not data.get("ok"):
+                        log.warning("CHATBOT_POLL", f"Telegram API error: {data}")
+                        return None
+                    
                     updates = data.get("result", [])
                     
                     if not updates:
+                        self._last_update_id += 1
                         return None
                     
-                    update = updates[0]
-                    update_id = update["update_id"]
+                    for update in updates:
+                        update_id = update.get("update_id", 0)
+                        if update_id <= self._last_update_id:
+                            continue
+                        
+                        self._last_update_id = update_id
+                        message = update.get("message", {})
+                        
+                        if not message:
+                            continue
+                        
+                        chat_id = str(message.get("chat", {}).get("id", ""))
+                        text = message.get("text", "")
+                        photo = message.get("photo")
+                        voice = message.get("voice")
+                        video = message.get("video")
+                        document = message.get("document")
+                        
+                        if photo or voice or video or document:
+                            return {"text": "", "chat_id": chat_id, "non_text": True}
+                        
+                        if text:
+                            return {"text": text, "chat_id": chat_id}
                     
-                    if update_id <= self._last_update_id:
-                        return None
+                    return None
                     
-                    self._last_update_id = update_id
-                    message = update.get("message", {})
-                    chat_id = str(message.get("chat", {}).get("id", ""))
-                    
-                    text = message.get("text", "")
-                    photo = message.get("photo")
-                    voice = message.get("voice")
-                    video = message.get("video")
-                    document = message.get("document")
-                    
-                    if photo or voice or video or document:
-                        return {"text": "", "chat_id": chat_id, "non_text": True}
-                    
-                    return {"text": text, "chat_id": chat_id}
         except asyncio.TimeoutError:
             return None
         except Exception as exc:

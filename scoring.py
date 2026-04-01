@@ -38,6 +38,7 @@ from btc_regime import RegimeResult, RelativeStrengthResult, Regime
 from derivatives import FundingResult, OIAccelerationResult, LiquidationResult
 from filters import FilterResult
 from logger import get_logger
+from squeeze_detector import detect_squeeze, score_adjustment_for_squeeze
 
 log = get_logger("scoring")
 
@@ -391,6 +392,31 @@ def compute_score(
             f"score downgraded for {symbol}: liq zone HIGH risk",
             symbol=symbol, direction=direction, score=total,
         )
+
+    squeeze = detect_squeeze(
+        funding_rate=funding.raw_rate if hasattr(funding, 'raw_rate') else funding.funding_8h if hasattr(funding, 'funding_8h') else None,
+        oi_change_pct=oi_accel.change_pct if hasattr(oi_accel, 'change_pct') else None,
+        current_price=closes[-1] if closes else 0,
+        ath_price=max(closes) if closes else 0,
+        position_direction=direction,
+    )
+    
+    if squeeze.is_squeeze:
+        band = ScoreBand.REJECT
+        total = 0.0
+        log.warning(
+            "PERFORMANCE_LOGGED",
+            f"SQUEEZE DETECTED for {symbol}: {squeeze.recommendation}",
+            symbol=symbol, direction=direction,
+        )
+    elif squeeze.danger_level == "MEDIUM":
+        adjusted = score_adjustment_for_squeeze(squeeze, total)
+        if adjusted < total:
+            log.warning(
+                "PERFORMANCE_LOGGED",
+                f"squeeze warning for {symbol}: danger={squeeze.danger_level}",
+                symbol=symbol, direction=direction,
+            )
 
     log.info(
         "PERFORMANCE_LOGGED",

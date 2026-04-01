@@ -33,6 +33,7 @@ ws_state = {
 }
 
 ws_price_cache: dict = {}   # symbol -> price, populated by on_market_data
+ws_orderbook_cache: dict = {}  # symbol -> {bid, ask}
 
 
 def _now_iso() -> str:
@@ -45,20 +46,40 @@ def _now_iso() -> str:
 
 async def _handle_message(raw: str) -> None:
     """
-    Process a raw WebSocket message.
-    Phase 1: parse JSON and log receipt only.
-    Phase 2: route to scanner/signal logic.
+    Process WebSocket messages and update price cache.
     """
     ws_state["last_message_at"] = _now_iso()
     try:
         data = json.loads(raw)
-        log.debug(
-            "WS_CONNECTED",
-            "message received",
-            ws_status="OPEN",
-        )
-        # TODO Phase 2: dispatch data to scanner
-        _ = data
+        
+        if "channel" in data:
+            channel = data.get("channel", "")
+            
+            if channel == "allMids":
+                mids = data.get("data", {})
+                for symbol, price in mids.items():
+                    try:
+                        ws_price_cache[symbol] = float(price)
+                    except (ValueError, TypeError):
+                        pass
+                log.debug("WS_PRICE_UPDATE", f"updated {len(mids)} prices")
+                
+            elif channel == "book":
+                symbol = data.get("symbol", "")
+                book_data = data.get("data", {})
+                bids = book_data.get("bids", [])
+                asks = book_data.get("asks", [])
+                if bids and asks:
+                    ws_orderbook_cache[symbol] = {
+                        "bid": float(bids[0][0]) if bids else 0,
+                        "ask": float(asks[0][0]) if asks else 0,
+                        "spread": 0
+                    }
+                    if ws_orderbook_cache[symbol]["bid"] > 0:
+                        ws_orderbook_cache[symbol]["spread"] = (
+                            ws_orderbook_cache[symbol]["ask"] - ws_orderbook_cache[symbol]["bid"]
+                        ) / ws_orderbook_cache[symbol]["bid"] * 100
+                        
     except json.JSONDecodeError as exc:
         log.warning("WS_CONNECTED", f"non-JSON frame received: {exc}", ws_status="OPEN")
 
@@ -119,8 +140,7 @@ async def _dead_stream_watchdog() -> None:
 def _build_subscription() -> str:
     """
     Hyperliquid subscription message.
-    Phase 1: subscribe to allMids (all mid-prices).
-    Phase 2: extend with specific coin/channel subscriptions.
+    Subscribe to allMids (prices) and orderbook snapshots.
     """
     return json.dumps({
         "method": "subscribe",

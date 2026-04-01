@@ -97,6 +97,13 @@ def _band_label(band) -> str:
 
 def _sentiment_pt(s: str) -> str:
     return {"positive": "Positivo 🟢", "negative": "Negativo 🔴"}.get(s, "Neutro ⚪")
+  
+def _direction_badge(d: str) -> str:
+    """Retorna badge visual para LONG/SHORT em português."""
+   if d.upper() == "LONG":
+      return "🔼 COMPRA LONGA"
+  else:
+       return "🔽 VENDA CURTA"
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +156,18 @@ _NEWS_KEYWORD_MAP = {
     "airdrop": "airdrop anunciado",
 }
 
-
+def _shorten_url(url: str, max_len: int = 60) -> str:
+    """Encurta URL para exibição em Telegram."""
+    if not url or len(url) <= max_len:
+        return url
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.replace("www.", "")
+        return f"{domain}/..."
+    except Exception:
+        return url[:max_len] + "..."
+      
 def _news_context_pt(title: str) -> str:
     """Gera tag de contexto em PT-BR baseada no título em inglês."""
     title_lower = title.lower()
@@ -159,11 +177,12 @@ def _news_context_pt(title: str) -> str:
     return "notícia relevante"
 
 
-def _format_news_line(news_ctx: NewsContext) -> str:
-    """
-    Formata notícia como linha linkável no Telegram (formato Markdown).
-    Exibe: emoji + contexto PT-BR + link clicável para o título original.
-    """
+    # Se tiver URL, exibe como link clicável com domínio encurtado
+    url = getattr(article, "url", None) or getattr(article, "link", None)
+    if url:
+        url_display = _shorten_url(url)
+        return f"• {sentiment_emoji} [{title_short}...]({url}) _{context_pt}_ ({age_min}min)\n   🔗 {url_display}"
+      
     if not news_ctx or not news_ctx.articles:
         return ""
 
@@ -246,8 +265,7 @@ def _build_signal_message(
         direction = sig.direction.upper()
         score     = sig.score
         band      = sig.band
-        sector    = get_sector_label(sym)
-        news_ctx  = news_map.get(sym)
+        lines.append(f"{_direction_badge(direction)} — *{sym}/USDT*")        news_ctx  = news_map.get(sym)
         price     = _get_price(sym)
         comp      = sig.components
         ai        = ai_map.get(sym)

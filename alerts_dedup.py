@@ -20,6 +20,7 @@ log = get_logger("alerts_dedup")
 
 COOLDOWN_SECONDS   = 3_600    # 1 hora (era 2h — muito agressivo)
 SCORE_DELTA_OVERRIDE = 8.0    # reenviar se score melhorou 8+ pts
+DAILY_MAX_PER_SYMBOL = 3  # máximo 3 alertas do mesmo símbolo por dia
 
 # ---------------------------------------------------------------------------
 # In-memory cache entry
@@ -89,12 +90,13 @@ class AlertDedupStore:
         key   = _make_key(symbol, direction)
         entry = await self._load(key)
 
-        if entry is None:
-            log.info(
-                "ALERT_SENT",
-                f"new alert key {key} — sending",
-                symbol=symbol, direction=direction, score=score,
-            )
+     if entry is None:
+         log.info(
+          "ALERT_SENT",
+           f"novo alerta {key} — enviando",
+           symbol=symbol, direction=direction, score=score,
+           )
+            return True, "NOVO"
             return True, "NEW"
 
         now     = time.time()

@@ -83,10 +83,9 @@ class JarvisChatbot:
             log.error("CHATBOT_ERROR", f"send failed: {exc}")
             return False
 
-    async def poll(self) -> Optional[str]:
+    async def poll(self) -> Optional[Dict]:
         url = f"{self._api_base}/getUpdates"
         params = {
-            "offset": self._last_update_id + 1,
             "timeout": 30,
             "allowed_updates": "message",
         }
@@ -94,18 +93,31 @@ class JarvisChatbot:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=35)) as resp:
                     if resp.status != 200:
+                        log.warning("CHATBOT_POLL", f"poll HTTP error: {resp.status}")
                         return None
                     data = await resp.json()
                     updates = data.get("result", [])
                     
-                    for update in updates:
-                        self._last_update_id = max(self._last_update_id, update["update_id"])
-                        message = update.get("message", {})
-                        if message.get("text"):
-                            return message["text"]
+                    if not updates:
+                        return None
+                    
+                    update = updates[0]
+                    update_id = update["update_id"]
+                    
+                    if update_id <= self._last_update_id:
+                        return None
+                    
+                    self._last_update_id = update_id
+                    message = update.get("message", {})
+                    text = message.get("text", "")
+                    chat_id = str(message.get("chat", {}).get("id", ""))
+                    
+                    return {"text": text, "chat_id": chat_id}
+        except asyncio.TimeoutError:
+            return None
         except Exception as exc:
             log.warning("CHATBOT_POLL", f"poll error: {exc}")
-        return None
+            return None
 
     async def handle_message(self, text: str, chat_id: str) -> str:
         if not text:

@@ -391,26 +391,37 @@ async def main() -> None:
             last_ranking=ctx.latest_ranking,
         )
         log.info("CHATBOT_READY", "chatbot Telegram ativo — comandos disponíveis")
+        
+        await asyncio.sleep(3)
+        welcome = await chatbot.handle_message("/start", tg_chat_id)
+        await chatbot._send_message(tg_chat_id, welcome)
+        log.info("CHATBOT_WELCOME", "welcome message sent")
 
     # ── 10. Message handling loop ────────────────────────────────────────
     async def chat_loop():
         if not chatbot:
             return
+        log.info("CHATBOT_LOOP", "chat loop started")
         while not _shutdown_event.is_set():
             try:
-                message = await asyncio.wait_for(chatbot.poll(), timeout=35)
-                if message:
-                    from scanner import run_scan_cycle as _scan
-                    ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
-                    chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
-                    response = await chatbot.handle_message(message, tg_chat_id)
-                    if response:
-                        await chatbot._send_message(tg_chat_id, response)
+                result = await asyncio.wait_for(chatbot.poll(), timeout=40)
+                if result:
+                    text = result.get("text", "")
+                    user_chat_id = result.get("chat_id", "")
+                    if text and user_chat_id:
+                        log.info("CHATBOT_MSG", f"received: {text[:50]}")
+                        from scanner import run_scan_cycle as _scan
+                        ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
+                        chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
+                        response = await chatbot.handle_message(text, user_chat_id)
+                        if response:
+                            sent = await chatbot._send_message(user_chat_id, response)
+                            log.info("CHATBOT_SENT", f"response sent: {sent}")
             except asyncio.TimeoutError:
                 pass
             except Exception as exc:
-                log.warning("CHATBOT_LOOP", f"chat error: {exc}")
-                await asyncio.sleep(5)
+                log.error("CHATBOT_LOOP", f"chat error: {exc}")
+                await asyncio.sleep(2)
 
     chat_task = asyncio.create_task(chat_loop()) if chatbot else None
 

@@ -1,24 +1,15 @@
 """
-main.py — Jarvis AI Trading Monitor - Sistema Proativo
-
-O Jarvis é um agente que:
-- Monitora 24/7 e te mantém antenado SEM você precisar perguntar
-- Alerta sobre mudanças de mercado, regime, notícias importantes
-- Mostra oportunidades automaticamente
-- Envia pulso de mercado periódico
-- Detecta squeezes e volatilidade
-
+main.py — Final integrated entry point (Phase 1–4)
 Startup order:
   1. DB pool + schema
   2. Performance tracker
-  3. Adaptive engine
+  3. Adaptive engine (restore weights)
   4. News engine
-  5. Notifier + Chatbot
-  6. Proactive agent
-  7. Health server
-  8. WebSocket client
-  9. APScheduler (all loops)
-  10. Graceful shutdown
+  5. Notifier + dedup table
+  6. Health server
+  7. WebSocket client (background)
+  8. APScheduler (all loops)
+  9. Graceful shutdown on SIGINT/SIGTERM
 """
 
 import asyncio
@@ -46,17 +37,6 @@ from performance_tracker import PerformanceTracker
 from portfolio_risk import PortfolioRiskManager
 from ranking import RankingResult
 from kill_switch import KillSwitch
-from proactive_agent import (
-    get_proactive_agent,
-    format_market_pulse_message,
-    format_regime_change_message,
-    format_important_news_alert,
-    format_opportunity_summary,
-    format_funding_alert,
-    format_exit_signal_alert,
-    format_performance_dashboard,
-    format_sentiment_summary,
-)
 from scanner import run_scan_cycle, get_symbols
 from scheduler import build_scheduler
 from sector_rotation import compute_sector_rotation
@@ -65,6 +45,10 @@ from websocket_client import run_websocket_client, ws_state
 log = get_logger("main")
 
 _state_lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# Global shared state — all loops read/write this
+# ---------------------------------------------------------------------------
 
 class AppContext:
     def __init__(self) -> None:
@@ -76,93 +60,62 @@ class AppContext:
         self.adaptive:             AdaptiveEngine       = AdaptiveEngine()
         self.macro:                MacroEngine          = MacroEngine()
         self.memory:               MemoryEngine         = MemoryEngine()
-        self.risk_manager:         PortfolioRiskManager = PortfolioRiskManager()
-        self.kill_switch:          KillSwitch          = KillSwitch()
-        
-        self.latest_articles:      List[NewsArticle]       = []
-        self.latest_ranking:       Optional[RankingResult]  = None
-        self.btc_closes:           List[float]              = []
-        self.btc_highs:            List[float]              = []
-        self.btc_lows:             List[float]              = []
+        self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
+        self.kill_switch:           KillSwitch          = KillSwitch()
+
+        # Live data caches (populated by WS + scan loops)
+        self.latest_articles:      List[NewsArticle]    = []
+        self.latest_ranking:       Optional[RankingResult] = None
+        self.btc_closes:           List[float]          = []
+        self.btc_highs:            List[float]          = []
+        self.btc_lows:             List[float]          = []
         self.latest_regime:        Optional[RegimeResult]  = None
-        self.last_scan_ts:         Optional[str]            = None
-        self.last_news_ts:         Optional[str]            = None
-        self.last_regime_ts:       Optional[str]            = None
-        self.btc_price:            float = 0.0
-        self._last_pulse_sent:     float = 0.0
+        self.last_scan_ts:         Optional[str]        = None
+        self.last_news_ts:         Optional[str]        = None
+        self.last_regime_ts:       Optional[str]        = None
 
 
 ctx = AppContext()
 _chatbot: Optional[JarvisChatbot] = None
-_proactive = get_proactive_agent()
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-async def _get_btc_price() -> float:
-    """Busca preço do BTC de forma segura."""
-    try:
-        from websocket_client import ws_price_cache
-        return ws_price_cache.get("BTC") or 0.0
-    except Exception:
-        return 0.0
-
-
-# ============================================================================
-# JOBS PROATIVOS
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Scheduled job implementations
+# ---------------------------------------------------------------------------
 
 async def job_btc_regime() -> None:
-    """Atualiza regime do BTC e detecta mudanças."""
+    """Refresh BTC regime every 2 min from Hyperliquid candles."""
     from btc_regime import compute_adx
     from hyperliquid_client import fetch_all_candles
+    candle_map = await fetch_all_candles(["BTC"], interval="15m", count=100)
+    candles    = candle_map.get("BTC", [])
+    if len(candles) < 30:
+        log.debug("BTC_REGIME_UPDATED", "btc_regime: not enough BTC candles")
+        return
+    highs  = [c.high  for c in candles]
+    lows   = [c.low   for c in candles]
+    closes = [c.close for c in candles]
+    regime = compute_adx(highs, lows, closes)
     
-    try:
-        candle_map = await fetch_all_candles(["BTC"], interval="15m", count=100)
-        candles    = candle_map.get("BTC", [])
-        
-        if len(candles) < 30:
-            log.debug("BTC_REGIME_UPDATED", "btc_regime: not enough BTC candles")
-            return
-        
-        highs  = [c.high  for c in candles]
-        lows   = [c.low   for c in candles]
-        closes = [c.close for c in candles]
-        regime = compute_adx(highs, lows, closes)
-        
-        ctx.latest_regime   = regime
-        ctx.last_regime_ts  = _now_iso()
-        ctx.btc_closes      = closes[-20:]
-        ctx.btc_highs       = highs[-20:]
-        ctx.btc_lows        = lows[-20:]
-        ctx.btc_price       = closes[-1]
-        
-        regime_str = str(regime.regime).split(".")[-1]
-        
-        if _proactive.should_alert_regime_change(regime_str) and _chatbot:
-            msg = format_regime_change_message(
-                new_regime=regime_str,
-                direction=regime.trend_direction,
-                strength=regime.adx,
-                previous=regime_str,
-            )
-            await _chatbot.send_alert(msg)
-            log.info("PROACTIVE_ALERT", f"regime change alerted: {regime_str}")
-        
-        log.info(
-            "BTC_REGIME_UPDATED",
-            f"BTC regime: {regime_str} ADX={regime.adx:.2f} dir={regime.trend_direction}",
-        )
-    except Exception as exc:
-        log.error("BTC_REGIME_ERROR", f"failed to update regime: {exc}")
+    ctx.latest_regime  = regime
+    ctx.last_regime_ts = _now_iso()
+    ctx.btc_closes = closes[-20:]
+    ctx.btc_highs = highs[-20:]
+    ctx.btc_lows = lows[-20:]
+    
+    log.info(
+        "BTC_REGIME_UPDATED",
+        f"BTC regime: {regime.regime} ADX={regime.adx:.2f} dir={regime.trend_direction}",
+    )
 
 
 async def job_news_fetch() -> None:
-    """Atualiza notícias e macro."""
+    """Refresh news + macro in parallel every 3 min."""
     t0 = time.monotonic()
-    
     async def _fetch_news():
         try:
             return await asyncio.wait_for(ctx.news_engine.fetch_all(), timeout=8.0)
@@ -175,65 +128,50 @@ async def job_news_fetch() -> None:
         ctx.macro.refresh(),
         return_exceptions=True,
     )
-    
     if isinstance(articles, list):
         ctx.latest_articles = articles
-        
-        if _chatbot and articles:
-            for article in articles[:5]:
-                title = getattr(article, "title", "")
-                sentiment = getattr(article, "sentiment", "neutral")
-                url = getattr(article, "url", "") or ""
-                news_key = f"{title[:50]}:{sentiment}"
-                
-                if _proactive.should_alert_news(news_key):
-                    from proactive_agent import format_important_news_alert
-                    if "sec" in title.lower() or "etf" in title.lower() or "federal" in title.lower():
-                        msg = format_important_news_alert(title, sentiment, url)
-                        await _chatbot.send_alert(msg)
-                        log.info("PROACTIVE_NEWS", f"high impact news alerted: {title[:50]}")
-
     ctx.last_news_ts = _now_iso()
     app_state["last_scan_timestamp"] = ctx.last_news_ts
-    log.timed("NEWS_FETCH_COMPLETE", f"news+macro: {len(ctx.latest_articles)} articles", t0)
+    log.timed("NEWS_FETCH_COMPLETE", f"news+macro parallel: {len(ctx.latest_articles)} articles", t0)
 
 
 async def job_scan_cycle() -> None:
-    """Scan completo + ranking + alertas proativos."""
+    """Full scan + ranking + notify every 5 min."""
     t0 = time.monotonic()
 
     current_ws_status = ws_state.get("status", "DISCONNECTED")
     if current_ws_status != "CONNECTED":
-        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan")
+        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan cycle")
         return
 
     quality = get_current_quality()
     if quality.should_block_signals:
         log.error("SCAN_SKIP", f"Data quality blocked: {quality.quality_label}")
-        if _chatbot and quality.warnings:
-            from proactive_agent import format_volatility_alert
-            warning_msg = "\n".join([f"• {w}" for w in quality.warnings[:2]])
-            await _chatbot.send_alert(f"⚠️ *QUALIDADE DOS DADOS*\n\n{warning_msg}\n\nSinais bloqueados temporariamente.")
         return
 
     if not ctx.kill_switch.can_trade():
         status = ctx.kill_switch.get_status()
         log.critical("KILL_SWITCH", f"Trading blocked: {status.reason}")
-        if _chatbot:
-            await _chatbot.send_alert(
-                f"🛑 *KILL SWITCH ATIVO*\n\n{status.reason}\n\n"
-                f"P&L Diário: {status.daily_pnl_pct*100:+.2f}%\n"
-                f"Perdas consecutivas: {status.consecutive_losses}\n\n"
-                "Trades bloqueados até reset."
-            )
+        if _chatbot and _chatbot._alert_chat_id:
+            await _chatbot.send_alert(f"🛑 *KILL SWITCH ATIVO*\n\n{status.reason}\n\nTrades bloqueados até reset.")
         return
 
     live_weights = ctx.adaptive.get_weights()
 
+    # Compute sector heat scores from latest news
+    # This feeds narrative momentum into per-symbol scores
     sector_heat_map = ctx.news_engine.get_sector_heat_scores(
         ctx.latest_articles
     ) if ctx.latest_articles else {}
+    if sector_heat_map:
+        hot = {k: v for k, v in sector_heat_map.items() if v > 65}
+        cold = {k: v for k, v in sector_heat_map.items() if v < 35}
+        log.info(
+            "SCAN_SECTOR_HEAT",
+            f"sector heat: hot={list(hot.keys())} cold={list(cold.keys())}",
+        )
 
+    # Run full scan — weights + sector heat + vol confirm all injected inside
     try:
         ranking = await asyncio.wait_for(
             run_scan_cycle(
@@ -243,57 +181,71 @@ async def job_scan_cycle() -> None:
             timeout=25.0,
         )
     except asyncio.TimeoutError:
-        log.error("SCAN_TIMEOUT", "scan cycle timed out after 25s")
+        log.error("SCAN_TIMEOUT", "scan cycle timed out after 25s — skipping")
         return
-    
-    ctx.latest_ranking = ranking
-    ctx.last_scan_ts   = _now_iso()
+    ctx.latest_ranking       = ranking
+    ctx.last_scan_ts         = _now_iso()
     app_state["last_scan_timestamp"] = ctx.last_scan_ts
 
+    # Build news context map for top signals
     news_map: Dict[str, Optional[NewsContext]] = {}
     for sig in ranking.top:
         news_map[sig.symbol] = ctx.news_engine.get_context_for_symbol(
             sig.symbol, ctx.latest_articles
         )
 
+    # Sector rotation (for logging/reporting only — heat already applied in scanner)
+    if ranking.top:
+        symbol_scores = {s.symbol: s.score for s in ranking.top}
+        symbol_news   = {s.symbol: (news_map.get(s.symbol) or _empty_news(s.symbol)).impact_score
+                         for s in ranking.top}
+        sector_result = compute_sector_rotation(symbol_scores, symbol_news)
+        log.info(
+            "SCAN_SECTOR_ROTATION",
+            f"sector rotation: hot={sector_result.hot_sectors} cold={sector_result.cold_sectors[:2]}",
+        )
+
+    # Get macro snapshot and memory insights
     macro_snap = ctx.macro.get_snapshot()
 
+    # PORTFOLIO RISK: Filter signals through risk manager
     approved_signals, rejected_signals = ctx.risk_manager.filter_signals(
         ranking.top, macro_snap
     )
     
+    # Update ranking with approved signals only
     if len(approved_signals) < len(ranking.top):
-        log.warning("SCAN_RISK", f"Risk blocked {len(ranking.top) - len(approved_signals)} signals")
+        log.warning("SCAN_RISK", f"Risk manager blocked {len(ranking.top) - len(approved_signals)} signals")
         ranking.top = approved_signals
         ranking.total_valid = len(approved_signals)
 
-    if ranking.top and _chatbot:
-        log.info("PROACTIVE_SIGNALS", f"sending opportunity summary for {len(ranking.top)} signals")
-        msg = format_opportunity_summary(ranking.top, news_map)
-        if msg:
-            await _chatbot.send_alert(msg)
-        
-        for sig in ranking.top[:1]:
-            reason_parts = []
-            if sig.components:
-                if sig.components.get("relative_strength", 0) >= 70:
-                    reason_parts.append(f"Força vs BTC: {sig.components['relative_strength']:.0f}")
-                if sig.components.get("funding", 0) >= 75:
-                    reason_parts.append("Funding favorável")
-                if sig.components.get("oi_acceleration", 0) >= 75:
-                    reason_parts.append("Entrada de dinheiro")
-            
-            await _chatbot.alert_signal(
-                symbol=sig.symbol,
-                direction=sig.direction,
-                score=sig.score,
-                reason=" | ".join(reason_parts) if reason_parts else "",
-            )
+    if not ranking.top:
+        log.info("SCAN_COMPLETE", "No signals after risk filtering")
+        return
 
+    # Dispatch alerts
     await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)
 
+    # PROATIVO: Enviar alertas via chatbot se tiver sinais
+    if ranking.top and _chatbot:
+        log.info("CHATBOT_ALERT", f"sending proactive alerts for {len(ranking.top)} signals")
+        for sig in ranking.top[:2]:
+            reason = ""
+            if "relative_strength" in sig.components:
+                reason = f"Força relativa: {sig.components['relative_strength']:.0f}"
+            try:
+                await _chatbot.alert_signal(
+                    symbol=sig.symbol,
+                    direction=sig.direction,
+                    score=sig.score,
+                    reason=reason,
+                )
+            except Exception as exc:
+                log.error("CHATBOT_ALERT", f"failed to send signal alert: {exc}")
+
+    # Register sent alerts for performance tracking
     for sig in ranking.top:
-        price = await _get_btc_price()
+        price = _get_price(sig.symbol)
         if price:
             await ctx.tracker.register_alert(
                 alert_id=f"{sig.symbol}:{sig.direction}:{ctx.last_scan_ts}",
@@ -301,130 +253,40 @@ async def job_scan_cycle() -> None:
                 direction=sig.direction,
                 score=sig.score,
                 entry_price=price,
-                dominant_component=sig.result.dominant_component,
+                dominant_component=sig.result.dominant_component,   # UPGRADE: feedback loop
             )
 
-    log.timed("SCAN_COMPLETE", f"scan done: {len(ranking.top)} signals", t0)
-
-
-async def job_market_pulse() -> None:
-    """Pulso de mercado a cada 15 minutos - mantém usuário antenado."""
-    if not _chatbot or not _proactive._should_send_pulse():
-        return
-    
-    try:
-        btc_price = await _get_btc_price()
-        
-        pulse = await _proactive.build_market_pulse(
-            btc_price=btc_price,
-            btc_closes=ctx.btc_closes,
-            regime_result=ctx.latest_regime,
-            news_articles=ctx.latest_articles,
-            macro_snap=ctx.macro.get_snapshot(),
-            ranking_result=ctx.latest_ranking,
-        )
-        
-        msg = format_market_pulse_message(pulse)
-        await _chatbot.send_alert(msg)
-        
-        _proactive._state.last_pulse_time = time.time()
-        log.info("PROACTIVE_PULSE", f"market pulse sent - BTC: {btc_price:,.2f}")
-        
-    except Exception as exc:
-        log.error("PROACTIVE_PULSE_ERROR", f"failed to send market pulse: {exc}")
+    log.timed("SCAN_COMPLETE", f"scan cycle done: {len(ranking.top)} signals", t0)
 
 
 async def job_performance_checks() -> None:
-    """Verifica performance dos sinais."""
+    """Check alert outcomes every hour."""
     await ctx.tracker.run_checks()
 
 
-async def job_performance_dashboard() -> None:
-    """Envia dashboard de performance a cada 4 horas."""
-    if not _chatbot:
-        return
-    
-    try:
-        stats = await ctx.tracker.get_recent_stats(days=7)
-        if stats and stats.get("total", 0) > 0:
-            msg = format_performance_dashboard(stats, period="7 dias")
-            await _chatbot.send_alert(msg)
-            log.info("PROACTIVE_DASHBOARD", "performance dashboard sent")
-    except Exception as exc:
-        log.error("PERFORMANCE_DASHBOARD_ERROR", f"failed to send dashboard: {exc}")
-
-
-async def job_sentiment_summary() -> None:
-    """Envia resumo de sentimento do mercado a cada 2 horas."""
-    if not _chatbot or not ctx.btc_closes or len(ctx.btc_closes) < 20:
-        return
-    
-    try:
-        from hyperliquid_client import fetch_all_candles
-        from btc_regime import compute_adx
-        
-        candle_map = await fetch_all_candles(["BTC"], interval="1h", count=24)
-        candles = candle_map.get("BTC", [])
-        
-        if len(candles) < 4:
-            return
-        
-        current_price = candles[-1].close
-        price_1h = candles[-2].close if len(candles) >= 2 else current_price
-        price_4h = candles[-5].close if len(candles) >= 5 else current_price
-        price_24h = candles[-25].close if len(candles) >= 25 else current_price
-        
-        change_1h = (current_price - price_1h) / price_1h * 100
-        change_4h = (current_price - price_4h) / price_4h * 100
-        change_24h = (current_price - price_24h) / price_24h * 100
-        
-        sentiment = "neutral"
-        if change_1h > 1:
-            sentiment = "bullish"
-        elif change_1h < -1:
-            sentiment = "bearish"
-        
-        msg = format_sentiment_summary(
-            btc_change_1h=change_1h,
-            btc_change_4h=change_4h,
-            btc_change_24h=change_24h,
-            market_sentiment=sentiment,
-        )
-        await _chatbot.send_alert(msg)
-        log.info("PROACTIVE_SENTIMENT", f"sentiment summary sent: {sentiment}")
-        
-    except Exception as exc:
-        log.error("SENTIMENT_SUMMARY_ERROR", f"failed to send sentiment: {exc}")
-
-
 async def job_macro_refresh() -> None:
-    """Atualiza dados macro e detecta riscos."""
+    """Refresh macro data every 30 min."""
     await ctx.macro.refresh()
     snap = ctx.macro.get_snapshot()
-    
-    if snap and _chatbot:
-        risk_score = getattr(snap, "risk_score", 50)
-        if risk_score >= 75:
-            events = getattr(snap, "events", [])
-            high_neg = [e for e in events if getattr(e, 'impact', '') == 'HIGH' and getattr(e, 'sentiment', '') == 'negative']
-            if high_neg:
-                await _chatbot.alert_macro_risk(
-                    risk_score=risk_score,
-                    event=high_neg[0].title[:100],
-                )
+    if snap:
+        high_neg = [e for e in snap.events if e.impact == 'HIGH' and e.sentiment == 'negative']
+        if high_neg and _chatbot:
+            await _chatbot.alert_macro_risk(
+                risk_score=snap.risk_score,
+                event=high_neg[0].title[:100],
+            )
 
 
 async def job_market_report() -> None:
-    """Relatório de mercado horário."""
+    """Send hourly market report to Telegram."""
     await ctx.notifier.send_market_report()
 
 
 async def job_btc_spike() -> None:
-    """Verifica movimentos bruscos do BTC."""
+    """Check BTC for sudden moves every 5 min."""
     await ctx.notifier.check_btc_spike()
-    
-    if _chatbot and ctx.btc_closes and len(ctx.btc_closes) >= 2:
-        btc_price = await _get_btc_price()
+    if _chatbot and _chatbot._alert_chat_id and ctx.btc_closes and len(ctx.btc_closes) >= 2:
+        btc_price = _get_price("BTC")
         if btc_price > 0:
             prev_price = ctx.btc_closes[0]
             change_pct = ((btc_price - prev_price) / prev_price) * 100
@@ -438,11 +300,10 @@ async def job_btc_spike() -> None:
 
 
 async def job_daily_summary() -> None:
-    """Resumo diário à meia-noite UTC."""
+    """Send daily summary at midnight UTC."""
     await ctx.notifier.send_daily_summary(tracker=ctx.tracker)
     if _chatbot:
         _chatbot.reset_daily_alerts()
-        _proactive.reset_daily()
         try:
             stats = await ctx.tracker.get_recent_stats(days=1)
             await _chatbot.alert_daily_summary(stats)
@@ -451,20 +312,21 @@ async def job_daily_summary() -> None:
 
 
 async def job_adaptive_tune() -> None:
-    """Re-tuna pesos a cada 24h."""
+    """Re-tune scoring weights every 24 hours."""
     await ctx.adaptive.adapt(ctx.tracker)
 
 
 async def job_flush_events() -> None:
-    """Flush eventos DB."""
+    """Flush buffered DB events every 15 seconds."""
     await flush_event_buffer()
 
 
-# ============================================================================
-# HELPERS
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _patch_scoring_weights(weights: Dict[str, float]) -> None:
+    """Inject live weights into the scoring module's global WEIGHTS dict."""
     try:
         import scoring
         for k, v in weights.items():
@@ -474,130 +336,110 @@ def _patch_scoring_weights(weights: Dict[str, float]) -> None:
         log.error("WEIGHT_UPDATE_FAIL", f"weight patch failed: {exc}")
 
 
-async def _send_startup_market_briefing() -> None:
-    """Envia briefing de mercado na inicialização."""
-    if not _chatbot:
-        return
-    
-    await asyncio.sleep(3)
-    
-    lines = [
-        "🤖 *JARVIS ONLINE — BRIEFING INICIAL*",
-        f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
-        "",
-        "*📡 Status do Sistema:*",
-        "• ✅ Scanner ativo",
-        "• ✅ WebSocket conectado" if ws_state.get("status") == "CONNECTED" else "• 🔄 WebSocket conectando",
-        "• ✅ IA Groq pronta" if os.getenv("GROQ_API_KEY") else "• ⚠️ IA desabilitada",
-        "",
-    ]
-    
-    btc_price = await _get_btc_price()
-    if btc_price > 0:
-        lines.append(f"*💹 BTC:* `${btc_price:,.2f}`")
-    
-    if ctx.latest_regime:
-        regime_str = str(ctx.latest_regime.regime).split(".")[-1]
-        regime_pt = {"TRENDING": "Em Tendência 📈", "RANGING": "Lateral ↔️", "WEAK": "Fraco 🔄"}.get(regime_str, regime_str)
-        lines.append(f"*📊 Regime:* {regime_pt}")
-        lines.append(f"*📐 ADX:* `{ctx.latest_regime.adx:.1f}`")
-    
-    news_count = len(ctx.latest_articles)
-    lines.append(f"*📰 Notícias:* {news_count} disponíveis")
-    
-    macro_snap = ctx.macro.get_snapshot()
-    if macro_snap:
-        risk_score = getattr(macro_snap, "risk_score", 50)
-        risk_emoji = "🔴" if risk_score >= 70 else ("🟡" if risk_score >= 50 else "🟢")
-        lines.append(f"*🌍 Risco Macro:* {risk_emoji} {risk_score:.0f}/100")
-    
-    lines.append("")
-    lines.append("*🔔 O que eu faço:*")
-    lines.append("• Alerto sobre oportunidades de trade automaticamente")
-    lines.append("• Notifico mudanças de regime do mercado")
-    lines.append("• Aviso sobre notícias importantes")
-    lines.append("• Envio pulso de mercado a cada 15 minutos")
-    lines.append("• Monitorei 24/7 para você")
-    lines.append("")
-    lines.append("💡 Digite /help para ver comandos disponíveis")
-    lines.append("")
-    lines.append("_Jarvis AI Trading Monitor_")
-    
-    msg = "\n".join(lines)
-    await _chatbot.send_alert(msg)
-    log.info("STARTUP_BRIEFING", "initial market briefing sent")
+def _get_price(symbol: str) -> Optional[float]:
+    try:
+        from websocket_client import ws_price_cache
+        return ws_price_cache.get(symbol)
+    except Exception:
+        return None
 
 
-# ============================================================================
-# GRACEFUL SHUTDOWN
-# ============================================================================
+def _empty_news(symbol: str):
+    from news_engine import NewsContext
+    return NewsContext(
+        symbol=symbol,
+        articles=[],
+        aggregate_sentiment="neutral",
+        impact_score=0.0,
+        top_headline="No news",
+        freshness_minutes=999.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown
+# ---------------------------------------------------------------------------
 
 _shutdown_event = asyncio.Event()
 
 
 def _handle_signal(sig) -> None:
-    log.warning("SYSTEM_SHUTDOWN", f"received {sig.name} — shutting down")
+    log.warning("SYSTEM_START", f"received {sig.name} — shutting down")
     _shutdown_event.set()
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 async def main() -> None:
-    log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor initializing ===")
-    
+    log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
     ai_key = bool(os.getenv("GROQ_API_KEY"))
-    ai_status = "habilitada" if ai_key else "desabilitada"
-    log.info("SYSTEM_START", f"Groq AI: {ai_status}")
+    ai_status = "habilitada" if ai_key else "desabilitada — configure GROQ_API_KEY"
+    log.info("SYSTEM_START", f"IA Groq: {ai_status}")
     app_state["started_at"] = _now_iso()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _handle_signal, sig)
 
+    # ── 1. Database ──────────────────────────────────────────────────────
     try:
         await init_db()
     except RuntimeError as exc:
         log.critical("SYSTEM_START", f"DB startup failed: {exc}")
         return
 
+    # ── 2. Performance tracker ───────────────────────────────────────────
     await ctx.tracker.startup()
+
+    # ── 3. Adaptive engine ───────────────────────────────────────────────
     await ctx.adaptive.startup()
     await ctx.memory.startup()
     await ctx.macro.refresh()
 
+    # ── 4. News engine (warm cache) ──────────────────────────────────────
     try:
         ctx.latest_articles = await ctx.news_engine.fetch_all()
-        ctx.last_news_ts = _now_iso()
-        log.info("SYSTEM_READY", f"news cache: {len(ctx.latest_articles)} articles")
+        ctx.last_news_ts    = _now_iso()
+        log.info("SYSTEM_READY", f"news cache warm: {len(ctx.latest_articles)} articles")
     except Exception as exc:
         log.warning("NEWS_PRIMARY_FAIL", f"initial news fetch failed: {exc}")
 
+    # ── 5. Notifier ──────────────────────────────────────────────────────
     tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    
-    if not tg_token or not tg_chat_id:
-        log.warning("SYSTEM_START", "Telegram not configured — alerts disabled")
-    
+    if not tg_token:
+        log.warning("SYSTEM_START", "TELEGRAM_BOT_TOKEN não configurada — alertas Telegram desabilitados")
+    if not tg_chat_id:
+        log.warning("SYSTEM_START", "TELEGRAM_CHAT_ID não configurada — alertas Telegram desabilitados")
+    log.info("SYSTEM_START", f"Telegram config — token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
     ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
     await ctx.notifier.startup()
     ctx.notifier.set_news_engine(ctx.news_engine)
+    await ctx.notifier.send_system_alert(
+        "🟢 *Crypto Monitor online*\nAll subsystems initialised. Scanner active."
+    )
+    log.info("SYSTEM_READY", "startup Telegram alert dispatched")
 
+    # ── 6. Health server ─────────────────────────────────────────────────
     await run_health_server()
+
+    # ── 7. WebSocket client ──────────────────────────────────────────────
     ws_task = asyncio.create_task(run_websocket_client())
 
+    # ── 8. Scheduler ─────────────────────────────────────────────────────
     sched = build_scheduler(
-        scan_fn=job_scan_cycle,
-        news_fn=job_news_fetch,
-        regime_fn=job_btc_regime,
-        performance_fn=job_performance_checks,
-        adaptive_fn=job_adaptive_tune,
-        market_report_fn=job_market_report,
-        macro_refresh_fn=job_macro_refresh,
-        btc_spike_fn=job_btc_spike,
-        daily_summary_fn=job_daily_summary,
-        flush_fn=job_flush_events,
+        scan_fn=        job_scan_cycle,
+        news_fn=        job_news_fetch,
+        regime_fn=      job_btc_regime,
+        performance_fn= job_performance_checks,
+        adaptive_fn=    job_adaptive_tune,
+        market_report_fn= job_market_report,
+        macro_refresh_fn= job_macro_refresh,
+        btc_spike_fn=   job_btc_spike,
+        daily_summary_fn= job_daily_summary,
+        flush_fn=       job_flush_events,          # UPGRADE: batch DB writes
     )
     sched.start()
 
@@ -608,9 +450,9 @@ async def main() -> None:
     )
     log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
 
+    # ── 9. Chatbot (Telegram) ───────────────────────────────────────────
     global _chatbot
     _chatbot = None
-    
     if tg_token and tg_chat_id:
         _chatbot = JarvisChatbot(tg_token)
         _chatbot.set_alert_chat_id(tg_chat_id)
@@ -623,24 +465,29 @@ async def main() -> None:
             kill_switch=ctx.kill_switch,
             last_ranking=ctx.latest_ranking,
         )
-        log.info("CHATBOT_READY", f"chatbot configured")
+        log.info("CHATBOT_READY", f"chatbot init - token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
         
-        asyncio.create_task(_send_startup_market_briefing())
+        await asyncio.sleep(2)
+        welcome = await _chatbot.handle_message("/start", tg_chat_id)
+        log.info("CHATBOT_WELCOME", f"sending welcome: {len(welcome)} chars")
+        sent = await _chatbot._send_message(tg_chat_id, welcome)
+        log.info("CHATBOT_INIT", f"welcome sent: {sent}")
 
-    sched.add_interval_job(job_market_pulse, minutes=15, name="market_pulse", jitter=60)
-    sched.add_interval_job(job_performance_dashboard, minutes=0, name="perf_dashboard", hours=4, jitter=300)
-    sched.add_interval_job(job_sentiment_summary, minutes=0, name="sentiment_summary", hours=2, jitter=60)
-    log.info("SYSTEM_READY", "proactive agent enabled")
-
+    # ── 10. Message handling loop ────────────────────────────────────────
     async def chat_loop():
         if not _chatbot:
             log.warning("CHATBOT_LOOP", "no chatbot configured")
             return
-        log.info("CHATBOT_LOOP", "chat loop started")
-        
+        log.info("CHATBOT_LOOP", "chat loop started - waiting for messages")
+        poll_count = 0
         while not _shutdown_event.is_set():
             try:
+                poll_count += 1
+                if poll_count % 10 == 0:
+                    log.debug("CHATBOT_POLL", f"still polling... count={poll_count}")
+                
                 result = await asyncio.wait_for(_chatbot.poll(), timeout=35)
+                
                 if result is None:
                     continue
                 
@@ -649,33 +496,40 @@ async def main() -> None:
                 non_text = result.get("non_text", False)
                 
                 if not user_chat_id:
+                    log.warning("CHATBOT_MSG", "no chat_id in result")
                     continue
                 
-                log.info("CHATBOT_MSG", f"user={user_chat_id} text='{text[:30]}'")
+                log.info("CHATBOT_MSG", f"user={user_chat_id} text='{text[:30]}...' non_text={non_text}")
                 
                 if non_text:
                     response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver comandos."
                 else:
+                    from scanner import run_scan_cycle as _scan
+                    ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
                     _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
                     response = await _chatbot.handle_message(text, user_chat_id)
                 
                 if response:
-                    await _chatbot._send_message(user_chat_id, response)
+                    sent = await _chatbot._send_message(user_chat_id, response)
+                    log.info("CHATBOT_RESPONSE", f"sent={sent} to {user_chat_id}")
                     
             except asyncio.TimeoutError:
-                pass
+                log.debug("CHATBOT_POLL", "timeout - no messages, continuing")
             except Exception as exc:
                 log.error("CHATBOT_ERROR", f"error: {exc}")
                 await asyncio.sleep(5)
 
     chat_task = asyncio.create_task(chat_loop()) if _chatbot else None
 
+    # ── 11. Run until signal ─────────────────────────────────────────────
     await _shutdown_event.wait()
 
-    log.info("SYSTEM_SHUTDOWN", "initiating graceful shutdown")
-    
-    if ctx.notifier:
-        await ctx.notifier.send_system_alert("🔴 *Jarvis offline*\nVoltando em breve.")
+    # ── 10. Graceful teardown ────────────────────────────────────────────
+    log.info("SYSTEM_START", "initiating graceful shutdown")
+
+    await ctx.notifier.send_system_alert("🔴 *Crypto Monitor offline*\nShutting down.")
+
+  
 
     ws_task.cancel()
     try:
@@ -691,8 +545,17 @@ async def main() -> None:
             pass
 
     await close_db()
-    log.info("SYSTEM_SHUTDOWN", "=== shutdown complete ===")
 
+    await write_system_event(
+        "SYSTEM_START", "shutdown complete",
+        level="INFO", module="main",
+    )
+    log.info("SYSTEM_START", "=== shutdown complete ===")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     try:

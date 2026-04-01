@@ -199,6 +199,7 @@ class JarvisChatbot:
                     updates = data.get("result", [])
                     
                     if not updates:
+                        self._last_update_id += 1
                         return None
                     
                     for update in updates:
@@ -282,16 +283,11 @@ class JarvisChatbot:
             "• Procuro oportunidades de compra/venda automaticamente\n"
             "• Analiso notícias e contexto macro\n"
             "• Valido sinais com inteligência artificial\n"
-            "• MONITOREO o mercado 24/7 e te mantenho antenado\n\n"
-            "📳 *Alertas Proativos:*\n"
-            "• Oportunidades de trade detectadas\n"
-            "• Mudanças de regime do mercado\n"
-            "• Notícias importantes do mercado\n"
-            "• Pulso de mercado a cada 15min\n\n"
-            "⚡ *Comandos Rápidos:*\n"
-            "/sinais - Ver oportunidades agora\n"
-            "/status - Status do sistema\n"
-            "/help - Ver todos os comandos\n\n"
+            "• Monitorei o mercado 24/7\n\n"
+            "⚡ *Comece agora:*\n"
+            "1. Digite /sinais para ver oportunidades\n"
+            "2. Use /ai + sua pergunta para conversar\n"
+            "3. /help para ver todos os comandos\n\n"
             f"📊 Status: {quality.quality_label}\n\n"
             "_Jarvis AI Trading Monitor_"
         )

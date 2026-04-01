@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from adaptive import AdaptiveEngine
-from analyst import get_analyst, format_daily_briefing, format_market_pulse, format_signal_with_education, format_regime_change_alert, format_important_news_alert, format_exit_signal
+from analyst import get_analyst
 from chatbot import JarvisChatbot
 from macro_intelligence import MacroEngine
 from memory_engine import MemoryEngine
@@ -63,7 +63,6 @@ class AppContext:
         self.memory:               MemoryEngine         = MemoryEngine()
         self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
         self.kill_switch:           KillSwitch          = KillSwitch()
-        self.analyst:              object = None
 
         # Live data caches (populated by WS + scan loops)
         self.latest_articles:      List[NewsArticle]    = []
@@ -72,7 +71,6 @@ class AppContext:
         self.btc_highs:            List[float]          = []
         self.btc_lows:             List[float]          = []
         self.latest_regime:        Optional[RegimeResult]  = None
-        self.btc_price:            float = 0.0
         self.last_scan_ts:         Optional[str]        = None
         self.last_news_ts:         Optional[str]        = None
         self.last_regime_ts:       Optional[str]        = None
@@ -80,7 +78,6 @@ class AppContext:
 
 ctx = AppContext()
 _chatbot: Optional[JarvisChatbot] = None
-_analyst = None
 
 
 def _now_iso() -> str:
@@ -320,59 +317,53 @@ async def job_adaptive_tune() -> None:
     await ctx.adaptive.adapt(ctx.tracker)
 
 
-async def job_market_pulse() -> None:
-    """Send market pulse with analyst style every 15 min."""
-    global _analyst
-    if not _chatbot:
-        return
-    
+async def job_analyst_pulse() -> None:
+    """Send analyst market pulse every 15 min."""
     try:
-        _analyst = get_analyst()
+        analyst = get_analyst()
+        btc_price = _get_price("BTC") or 0
         
-        btc_price = _get_price("BTC") or ctx.btc_price
-        
-        context = _analyst.analyze_market(
-            btc_price=btc_price,
-            btc_closes=ctx.btc_closes,
-            regime_result=ctx.latest_regime,
-            macro_snap=ctx.macro.get_snapshot(),
-        )
-        
-        msg = format_market_pulse(context)
-        await _chatbot.send_alert(msg)
-        
-        _analyst._state.last_pulse_time = time.time()
-        log.info("ANALYST_PULSE", f"market pulse sent - BTC: {btc_price:,.2f}")
-        
+        if ctx.latest_regime:
+            context = analyst.analyze_market(
+                btc_price=btc_price,
+                btc_closes=ctx.btc_closes[-20:] if ctx.btc_closes else [],
+                regime_result=ctx.latest_regime,
+                macro_snap=ctx.macro.get_snapshot(),
+            )
+            
+            from analyst import format_market_pulse
+            msg = format_market_pulse(context)
+            
+            if _chatbot and _chatbot._alert_chat_id:
+                await _chatbot.send_alert(msg)
+                log.info("ANALYST", "market pulse sent")
     except Exception as exc:
-        log.error("ANALYST_PULSE_ERROR", f"failed: {exc}")
+        log.error("ANALYST_ERROR", f"pulse failed: {exc}")
 
 
-async def job_daily_briefing() -> None:
-    """Send daily briefing with analyst style at market open."""
-    global _analyst
-    if not _chatbot:
-        return
-    
+async def job_analyst_briefing() -> None:
+    """Send analyst briefing every 4 hours."""
     try:
-        _analyst = get_analyst()
+        analyst = get_analyst()
+        btc_price = _get_price("BTC") or 0
         
-        btc_price = _get_price("BTC") or ctx.btc_price
-        
-        context = _analyst.analyze_market(
-            btc_price=btc_price,
-            btc_closes=ctx.btc_closes,
-            regime_result=ctx.latest_regime,
-            macro_snap=ctx.macro.get_snapshot(),
-        )
-        
-        msg = format_daily_briefing(context, top_signals=ctx.latest_ranking.top if ctx.latest_ranking else None)
-        await _chatbot.send_alert(msg)
-        
-        log.info("ANALYST_BRIEFING", "daily briefing sent")
-        
+        if ctx.latest_regime:
+            context = analyst.analyze_market(
+                btc_price=btc_price,
+                btc_closes=ctx.btc_closes[-20:] if ctx.btc_closes else [],
+                regime_result=ctx.latest_regime,
+                macro_snap=ctx.macro.get_snapshot(),
+            )
+            
+            from analyst import format_daily_briefing
+            signals = ctx.latest_ranking.top if ctx.latest_ranking else None
+            msg = format_daily_briefing(context, signals)
+            
+            if _chatbot and _chatbot._alert_chat_id:
+                await _chatbot.send_alert(msg)
+                log.info("ANALYST", "briefing sent")
     except Exception as exc:
-        log.error("ANALYST_BRIEFING_ERROR", f"failed: {exc}")
+        log.error("ANALYST_ERROR", f"briefing failed: {exc}")
 
 
 async def job_flush_events() -> None:
@@ -477,14 +468,7 @@ async def main() -> None:
     await ctx.notifier.startup()
     ctx.notifier.set_news_engine(ctx.news_engine)
     await ctx.notifier.send_system_alert(
-        "🤖 *Jarvis Online*\n\nAnalista de trading ativo 24/7.\n\n"
-        "📊 O que eu faço:\n"
-        "• Monitorei o mercado continuamente\n"
-        "• Identifico oportunidades de trade\n"
-        "• Alertou sobre mudanças de regime\n"
-        "• Gerencio risco ativamente\n\n"
-        "📢 Próximo briefing em breve.\n\n"
-        "_Seu Analista de Trading_"
+        "🟢 *Crypto Monitor online*\nAll subsystems initialised. Scanner active."
     )
     log.info("SYSTEM_READY", "startup Telegram alert dispatched")
 
@@ -505,12 +489,12 @@ async def main() -> None:
         macro_refresh_fn= job_macro_refresh,
         btc_spike_fn=   job_btc_spike,
         daily_summary_fn= job_daily_summary,
-        flush_fn=       job_flush_events,
+        flush_fn=       job_flush_events,          # UPGRADE: batch DB writes
     )
     sched.start()
     
-    sched.add_interval_job(job_market_pulse, minutes=15, name="market_pulse", jitter=30)
-    sched.add_interval_job(job_daily_briefing, minutes=0, name="daily_briefing", hours=1, jitter=300)
+    sched.add_interval_job(job_analyst_pulse, minutes=15, name="analyst_pulse", jitter=30)
+    sched.add_interval_job(job_analyst_briefing, minutes=0, name="analyst_briefing", hours=4, jitter=300)
 
     await write_system_event(
         "SYSTEM_READY",

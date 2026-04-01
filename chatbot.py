@@ -31,8 +31,16 @@ log = get_logger("chatbot")
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 AI_MODEL = "llama-3.1-8b-instant"
+AI_MODEL_VISION = "llama-3.2-11b-vision-preview"
 AI_TIMEOUT_S = 15
 AI_MAX_TOKENS = 500
+IMAGE_ANALYSIS_PROMPT = """Você é um analista de trading profissional. Analise esta imagem (pode ser gráfico, print de trading, dashboard, etc) e forneça:
+1. O que você vê na imagem
+2. Análise técnica (se aplicável)
+3. Insights ou observações importantes
+4. Sugestões ou alertas
+
+Responda em português de forma clara e profissional."""
 
 
 class JarvisChatbot:
@@ -220,7 +228,11 @@ class JarvisChatbot:
                         video = message.get("video")
                         document = message.get("document")
                         
-                        if photo or voice or video or document:
+                        if photo:
+                            return {"text": "", "chat_id": chat_id, "photo": photo}
+                        elif document:
+                            return {"text": "", "chat_id": chat_id, "document": document}
+                        elif voice or video:
                             return {"text": "", "chat_id": chat_id, "non_text": True}
                         
                         if text:
@@ -234,12 +246,23 @@ class JarvisChatbot:
             log.warning("CHATBOT_POLL", f"poll error: {exc}")
             return None
 
-    async def handle_message(self, text: str, chat_id: str, non_text: bool = False) -> str:
+    async def handle_message(self, text: str, chat_id: str, photo: list = None, 
+                          document: dict = None, non_text: bool = False) -> str:
         if non_text:
-            return "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver o que posso fazer!"
+            if photo:
+                return await self._handle_photo(chat_id, photo)
+            elif document:
+                return await self._handle_document(chat_id, document)
+            return "📎 Tipo de mensagem não suportado.\n\nDigite /help para ver o que posso fazer!"
         
         if not text:
             return ""
+        
+        # Detectar URL no texto
+        if "http://" in text or "https://" in text:
+            return await self._handle_url(chat_id, text)
+        
+        text = text.strip()
         
         text = text.strip()
         
@@ -272,6 +295,199 @@ class JarvisChatbot:
         import random
         tip = random.choice(self._quick_tips)
         return response + "\n\n" + tip
+    
+    async def _handle_photo(self, chat_id: str, photo: list) -> str:
+        """Analisa imagem enviada pelo usuário."""
+        log.info("CHATBOT_IMAGE", f"Received photo from {chat_id}")
+        
+        try:
+            # Pegar a foto de maior resolução
+            photo_id = photo[-1].get("file_id") if photo else None
+            if not photo_id:
+                return "📷 Não consegui processar a imagem. Tente novamente."
+            
+            # Baixar a imagem
+            file_url = f"{self._api_base}/getFile?file_id={photo_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_url) as resp:
+                    if resp.status != 200:
+                        return "📷 Erro ao baixar imagem."
+                    file_data = await resp.json()
+            
+            file_path = file_data.get("result", {}).get("file_path")
+            if not file_path:
+                return "📷 Não consegui acessar a imagem."
+            
+            # Baixar imagem em alta resolução
+            download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(download_url) as resp:
+                    if resp.status != 200:
+                        return "📷 Erro ao baixar imagem."
+                    image_bytes = await resp.read()
+            
+            # Enviar para IA analisar
+            api_key = os.getenv("GROQ_API_KEY", "")
+            if not api_key:
+                return "🤖 IA não disponível. Configure GROQ_API_KEY para analisar imagens."
+            
+            # Analisar com visão
+            result = await self._analyze_image(image_bytes, api_key)
+            if result:
+                return f"📊 *Análise da Imagem*\n\n{result}\n\n_Jarvis AI Trading Monitor_"
+            else:
+                return "🤖 Erro ao analisar imagem. Tente novamente."
+                
+        except Exception as exc:
+            log.error("CHATBOT_IMAGE_ERROR", f"failed: {exc}")
+            return f"📷 Erro ao processar imagem: {exc}"
+    
+    async def _handle_document(self, chat_id: str, document: dict) -> str:
+        """Processa documento enviado."""
+        file_name = document.get("file_name", "documento")
+        file_id = document.get("file_id")
+        
+        # Verificar se é imagem
+        mime = document.get("mime_type", "")
+        if "image" in mime:
+            return await self._handle_photo(chat_id, [{"file_id": file_id}])
+        
+        return f"📄 Documento '{file_name}' recebido.\n\nNo momento só suporto imagens para análise.\nTente enviar um print ou screenshot."
+    
+    async def _handle_url(self, chat_id: str, text: str) -> str:
+        """Analisa conteúdo de URL enviada."""
+        log.info("CHATBOT_URL", f"URL detected from {chat_id}")
+        
+        try:
+            # Extrair URL do texto
+            import re
+            urls = re.findall(r'https?://[^\s<>"\']+', text)
+            
+            if not urls:
+                return await self._cmd_ai(chat_id, text)
+            
+            url = urls[0][:500]  # Limitar tamanho
+            
+            # Fetch do conteúdo
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        return f"🔗 Não consegui acessar a URL (status: {resp.status})"
+                    
+                    content_type = resp.headers.get("Content-Type", "")
+                    
+                    if "text/html" in content_type:
+                        html = await resp.text()
+                        # Extrair texto relevante
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(html, "html.parser")
+                        
+                        # Remover scripts e styles
+                        for script in soup(["script", "style"]):
+                            script.decompose()
+                        
+                        text_content = soup.get_text()
+                        # Limpar texto
+                        lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+                        text_content = ' '.join(lines)[:3000]
+                        
+                        if not text_content:
+                            return "🔗 Conteúdo da página não pôde ser extraído."
+                        
+                        # Analisar com IA
+                        api_key = os.getenv("GROQ_API_KEY", "")
+                        if not api_key:
+                            return f"🔗 *Conteúdo da URL:*\n\n{text_content[:1000]}...\n\nConfigure GROQ_API_KEY para análise com IA."
+                        
+                        analysis = await self._analyze_url_content(url, text_content, api_key)
+                        return analysis
+                    else:
+                        return f"🔗 URL acessível mas conteúdo não é HTML. Tipo: {content_type[:50]}"
+                        
+        except asyncio.TimeoutError:
+            return "🔗 Tempo esgotado ao acessar URL. A página pode estar lenta."
+        except Exception as exc:
+            log.error("CHATBOT_URL_ERROR", f"failed: {exc}")
+            return f"🔗 Erro ao acessar URL: {exc}"
+    
+    async def _analyze_image(self, image_bytes: bytes, api_key: str) -> Optional[str]:
+        """Analisa imagem com IA."""
+        try:
+            import base64
+            image_b64 = base64.b64encode(image_bytes).decode()
+            
+            payload = {
+                "model": AI_MODEL_VISION,
+                "messages": [
+                    {"role": "system", "content": IMAGE_ANALYSIS_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Analise esta imagem:"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                        ]
+                    }
+                ],
+                "max_tokens": 800,
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    GROQ_API_URL, 
+                    json=payload, 
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.error("CHATBOT_VISION", f"API error: {resp.status}")
+                        return None
+                    
+                    data = await resp.json()
+                    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    
+        except Exception as exc:
+            log.error("CHATBOT_VISION", f"failed: {exc}")
+            return None
+    
+    async def _analyze_url_content(self, url: str, content: str, api_key: str) -> str:
+        """Analisa conteúdo de URL com IA."""
+        try:
+            payload = {
+                "model": AI_MODEL,
+                "messages": [
+                    {"role": "system", "content": "Você é um analista de trading profissional. Analise o conteúdo desta página web e forneça insights relevantes sobre crypto, trading ou mercados financeiros."},
+                    {"role": "user", "content": f"URL: {url}\n\nConteúdo:\n{content[:4000]}"}
+                ],
+                "max_tokens": 600,
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    GROQ_API_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    if resp.status != 200:
+                        return f"🔗 *Conteúdo da URL:*\n\n{content[:1000]}...\n\n(IA indisponível para análise)"
+                    
+                    data = await resp.json()
+                    analysis = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    return f"🔗 *Análise da URL*\n\n📄 {url}\n\n{analysis}\n\n_Jarvis AI Trading Monitor_"
+                    
+        except Exception as exc:
+            log.error("CHATBOT_URL_AI", f"failed: {exc}")
+            return f"🔗 *Conteúdo:*\n\n{content[:1000]}...\n\n(Erro na análise: {exc})"
 
     async def _cmd_start(self, chat_id: str, args: str) -> str:
         quality = get_current_quality()

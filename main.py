@@ -384,7 +384,7 @@ async def main() -> None:
     if tg_token and tg_chat_id:
         chatbot = JarvisChatbot(tg_token)
         chatbot.set_system_refs(
-            scanner=ctx,
+            scanner_module=run_scan_cycle,
             news_engine=ctx.news_engine,
             macro_engine=ctx.macro,
             tracker=ctx.tracker,

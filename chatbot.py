@@ -41,6 +41,7 @@ class JarvisChatbot:
         self._api_base = TELEGRAM_API.format(token=token)
         self._last_update_id = 0
         self._system_refs: Dict[str, Any] = {}
+        self._user_first_contact: Dict[str, bool] = {}
         
         self._commands = {
             "/start": self._cmd_start,
@@ -53,6 +54,13 @@ class JarvisChatbot:
             "/scan": self._cmd_scan,
             "/ai": self._cmd_ai,
         }
+        
+        self._quick_tips = [
+            "💡 Digite /sinais para ver oportunidades de trade",
+            "💡 Use /ai + sua pergunta para conversar comigo",
+            "💡 /news mostra as últimas notícias do mercado",
+            "💡 /status verifica se tudo está funcionando",
+        ]
 
     def set_system_refs(self, **refs) -> None:
         self._system_refs.update(refs)
@@ -105,6 +113,9 @@ class JarvisChatbot:
         
         text = text.strip()
         
+        is_first = self._user_first_contact.get(chat_id, True)
+        self._user_first_contact[chat_id] = False
+        
         if text.startswith("/"):
             parts = text.split(" ", 1)
             cmd = parts[0].lower()
@@ -112,7 +123,10 @@ class JarvisChatbot:
             
             if cmd in self._commands:
                 try:
-                    return await self._commands[cmd](chat_id, args)
+                    response = await self._commands[cmd](chat_id, args)
+                    if is_first and cmd != "/start":
+                        response = self._add_welcome_tip(response)
+                    return response
                 except Exception as exc:
                     log.error("CHATBOT_ERROR", f"command error {cmd}: {exc}")
                     return f"❌ Erro ao executar comando: {exc}"
@@ -122,99 +136,102 @@ class JarvisChatbot:
         if len(text) > 3:
             return await self._cmd_ai(chat_id, text)
         
-        return "💬 Digite um comando (/help) ou faça uma pergunta sobre o mercado."
+        return "💬 Quer ajuda? Digite /help para ver o que posso fazer!"
+
+    def _add_welcome_tip(self, response: str) -> str:
+        import random
+        tip = random.choice(self._quick_tips)
+        return response + "\n\n" + tip
 
     async def _cmd_start(self, chat_id: str, args: str) -> str:
         quality = get_current_quality()
-        lines = [
-            "🤖 *Jarvis AI Trading Monitor*",
-            "",
-            "Olá! Sou o assistente de trading do Jarvis.",
-            "",
-            "*O que eu posso fazer:*",
-            "• Analisar o mercado de crypto em tempo real",
-            "• Gerar sinais de trade com IA",
-            "• Monitorar notícias e contexto macroeconômico",
-            "• Acompanhar a performance do sistema",
-            "",
-            "*Comandos disponíveis:*",
-            "/help    - Ver todos os comandos",
-            "/status  - Status do sistema",
-            "/sinais  - Últimos sinais gerados",
-            "/news    - Últimas notícias",
-            "/macro   - Contexto macro atual",
-            "/ai      - Pergunte qualquer coisa",
-            "",
-            "🏆 *Qualidade dos dados:* " + quality.quality_label,
-            "",
-            "_Jarvis AI Trading Monitor_",
-        ]
-        return "\n".join(lines)
+        
+        welcome = (
+            "🤖 *Jarvis AI Trading Monitor*\n\n"
+            "Olá! Sou seu assistente de trading pessoal.\n\n"
+            "🎯 *O que eu faço:*\n"
+            "• Procuro oportunidades de compra/venda automaticamente\n"
+            "• Analiso notícias e contexto macro\n"
+            "• Valido sinais com inteligência artificial\n"
+            "• Monitorei o mercado 24/7\n\n"
+            "⚡ *Comece agora:*\n"
+            "1. Digite /sinais para ver oportunidades\n"
+            "2. Use /ai + sua pergunta para conversar\n"
+            "3. /help para ver todos os comandos\n\n"
+            f"📊 Status: {quality.quality_label}\n\n"
+            "_Jarvis AI Trading Monitor_"
+        )
+        return welcome
 
     async def _cmd_help(self, chat_id: str, args: str) -> str:
-        lines = [
-            "📚 *Manual de Comandos*",
-            "",
-            "*📊 Informações do Mercado:*",
-            "/sinais  - Lista sinais de trade do último scan",
-            "/news    - Últimas notícias do mercado",
-            "/macro   - Contexto macroeconômico (Fed, CPI, etc)",
-            "",
-            "*📈 Status do Sistema:*",
-            "/status  - Conexões, dados, kesehatan do sistema",
-            "/performance - Taxa de acerto, PnL recente",
-            "",
-            "*🤖 Inteligência Artificial:*",
-            "/ai [pergunta] - Faça qualquer pergunta sobre crypto",
-            "Ex: /ai o BTC vai subir essa semana?",
-            "",
-            "*⚡ Ações:*",
-            "/scan    - Força um novo scan (quando disponível)",
-            "",
-            "_Digite /ai [sua pergunta] para conversar_",
-        ]
-        return "\n".join(lines)
+        return (
+            "📚 *Todos os Comandos*\n\n"
+            "🔍 *Mercado:*\n"
+            "/sinais    - Ver oportunidades de trade\n"
+            "/news      - Últimas notícias\n"
+            "/macro     - Contexto macroeconômico\n\n"
+            "📊 *Sistema:*\n"
+            "/status    - Como está o sistema\n"
+            "/performance - Nossos resultados\n\n"
+            "🤖 *Conversar:*\n"
+            "/ai [pergunta] - Fazer qualquer pergunta\n"
+            "Ex: /ai BTC vai subir?\n\n"
+            "⚡ *Ações:*\n"
+            "/scan - Forçar nova análise\n\n"
+            "💡 *Dica:* Pode perguntar direto também!"
+        )
 
     async def _cmd_status(self, chat_id: str, args: str) -> str:
         quality = get_current_quality()
-        scanner = self._system_refs.get("scanner")
-        news_engine = self._system_refs.get("news_engine")
-        macro_engine = self._system_refs.get("macro_engine")
         
-        lines = [
+        emoji_hl = "✅" if quality.hyperliquid_available else "❌"
+        emoji_ws = "✅" if quality.ws_connected else "⚠️"
+        emoji_news = "✅" if quality.news_api_available else "❌"
+        emoji_macro = "✅" if quality.macro_api_available else "❌"
+        emoji_ai = "✅" if quality.ai_available else "❌"
+        
+        status_lines = [
             "📊 *Status do Sistema*",
             f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
             "",
             "*🔗 Conexões:*",
-            f"• Hyperliquid: {'✅' if quality.hyperliquid_available else '❌'}",
-            f"• WebSocket: {'✅' if quality.ws_connected else '❌'}",
-            f"• News API: {'✅' if quality.news_api_available else '❌'}",
-            f"• Macro API: {'✅' if quality.macro_api_available else '❌'}",
-            f"• Groq AI: {'✅' if quality.ai_available else '❌'}",
+            f"• Hyperliquid: {emoji_hl} Preços em tempo real",
+            f"• WebSocket: {emoji_ws} {"Atualizações live" if quality.ws_connected else "Reconectando..."}",
+            f"• Notícias: {emoji_news} Fontes ativas",
+            f"• Macro: {emoji_macro} Dados econômicos",
+            f"• IA Groq: {emoji_ai} {"Disponível" if quality.ai_available else "Sem IA"}",
             "",
-            "*📡 Dados:*",
-            f"• Qualidade: {quality.quality_label}",
-            f"• Score: {quality.quality_score:.0%}",
-            f"• Market data: {quality.market_age_minutes:.0f}min atrás",
-            f"• Notícias: {quality.news_age_minutes:.0f}min atrás",
-            f"• Símbolos: {quality.symbols_with_data}/{quality.symbols_requested}",
-            "",
+            "*📡 Qualidade:*",
+            f"• {quality.quality_label}",
+            f"• Dados de mercado: {quality.market_age_minutes:.0f}min",
+            f"• Notícias: {quality.news_age_minutes:.0f}min",
+            f"• Símbolos monitorados: {quality.symbols_with_data}/{quality.symbols_requested}",
         ]
         
         if quality.warnings:
-            lines.append("*⚠️ Avisos:*")
-            for w in quality.warnings[:3]:
-                lines.append(w)
-            lines.append("")
+            status_lines.append("")
+            status_lines.append("*⚠️ Atenção:*")
+            for w in quality.warnings[:2]:
+                status_lines.append(w)
         
-        lines.append("_Jarvis AI Trading Monitor_")
-        return "\n".join(lines)
+        status_lines.append("")
+        status_lines.append("_Jarvis AI Trading Monitor_")
+        return "\n".join(status_lines)
 
     async def _cmd_sinais(self, chat_id: str, args: str) -> str:
         ranking = self._system_refs.get("last_ranking")
         
         if not ranking or not ranking.top:
-            return "📭 *Sinais*\\n\\nNenhum sinal disponível no momento. O sistema ainda não completou um scan ou não encontrou oportunidades."
+            quality = get_current_quality()
+            ws_status = "✅ Conectado" if quality.ws_connected else "❌ Desconectado"
+            return (
+                "📭 *Nenhum sinal agora*\n\n"
+                "O sistema monitora 24/7, mas nem sempre há oportunidades claras.\n\n"
+                f"Status WebSocket: {ws_status}\n"
+                "• Tente /scan para forçar uma análise\n"
+                "• Use /status para ver o estado do sistema\n"
+                "• /news mostra últimas notícias"
+            )
         
         lines = [
             "🚨 *Sinais de Trade*",
@@ -242,13 +259,13 @@ class JarvisChatbot:
         news_engine = self._system_refs.get("news_engine")
         
         if not news_engine:
-            return "📰 *Notícias*\\n\\nSistema de notícias não disponível."
+            return "📰 *Notícias*\n\nSistema de notícias não disponível."
         
         try:
             articles = news_engine._cache[:5] if hasattr(news_engine, "_cache") and news_engine._cache else []
             
             if not articles:
-                return "📰 *Notícias*\\n\\nNenhuma notícia disponível. O sistema pode estar buscando dados..."
+                return "📰 *Notícias*\n\nNenhuma notícia disponível. O sistema pode estar buscando dados..."
             
             lines = [
                 "📰 *Últimas Notícias*",
@@ -268,19 +285,19 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"news error: {exc}")
-            return f"📰 *Notícias*\\n\\nErro ao buscar notícias: {exc}"
+            return f"📰 *Notícias*\n\nErro ao buscar notícias: {exc}"
 
     async def _cmd_macro(self, chat_id: str, args: str) -> str:
         macro_engine = self._system_refs.get("macro_engine")
         
         if not macro_engine:
-            return "🌍 *Macro*\\n\\nSistema macro não disponível."
+            return "🌍 *Macro*\n\nSistema macro não disponível."
         
         try:
             snap = macro_engine.get_snapshot()
             
             if not snap:
-                return "🌍 *Contexto Macroeconômico*\\n\\nDados macro ainda carregando..."
+                return "🌍 *Contexto Macroeconômico*\n\nDados macro ainda carregando..."
             
             lines = [
                 "🌍 *Contexto Macroeconômico*",
@@ -313,13 +330,13 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"macro error: {exc}")
-            return f"🌍 *Macro*\\n\\nErro ao buscar dados macro: {exc}"
+            return f"🌍 *Macro*\n\nErro ao buscar dados macro: {exc}"
 
     async def _cmd_performance(self, chat_id: str, args: str) -> str:
         tracker = self._system_refs.get("tracker")
         
         if not tracker:
-            return "📈 *Performance*\\n\\nSistema de tracking não disponível."
+            return "📈 *Performance*\n\nSistema de tracking não disponível."
         
         try:
             stats = await tracker.get_recent_stats(days=7)
@@ -350,41 +367,49 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"performance error: {exc}")
-            return f"📈 *Performance*\\n\\nErro ao buscar performance: {exc}"
+            return f"📈 *Performance*\n\nErro ao buscar performance: {exc}"
 
     async def _cmd_scan(self, chat_id: str, args: str) -> str:
-        scanner = self._system_refs.get("scanner")
+        scan_fn = self._system_refs.get("scanner_module")
         
-        if not scanner:
-            return "⚡ *Scan*\\n\\nScanner não disponível."
+        if not scan_fn:
+            return "⚡ *Scan*\n\nScanner não disponível."
         
         try:
-            ranking = await scanner.run_scan_cycle()
+            ranking = await scan_fn()
             
             if ranking and ranking.top:
                 count = len(ranking.top)
                 top_sig = ranking.top[0]
                 emoji = "📈" if top_sig.direction == "LONG" else "📉"
-                return f"✅ *Scan Completo*\\n\\n{count} sinal(ais) encontrado(s):\\n{emoji} {top_sig.symbol}/USDT ({top_sig.direction}) com score `{top_sig.score:.0f}`"
+                return f"✅ *Scan Completo*\n\n{count} sinal(ais) encontrado(s):\n{emoji} {top_sig.symbol}/USDT ({top_sig.direction}) com score `{top_sig.score:.0f}`"
             else:
-                return "✅ *Scan Completo*\\n\\nNenhum sinal válido encontrado neste scan."
+                return "✅ *Scan Completo*\n\nNenhum sinal válido encontrado neste scan."
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"scan error: {exc}")
-            return f"⚡ *Scan*\\n\\nErro ao executar scan: {exc}"
+            return f"⚡ *Scan*\n\nErro ao executar scan: {exc}"
 
     async def _cmd_ai(self, chat_id: str, args: str) -> str:
         api_key = os.getenv("GROQ_API_KEY", "")
         
         if not api_key:
-            return "🤖 *IA não disponível*\\n\\nGROQ_API_KEY não configurada. Configure a variável de ambiente para usar a IA."
+            return "🤖 *IA não disponível*\n\nGROQ_API_KEY não configurada. Configure a variável de ambiente para usar a IA."
         
         if not args:
-            return "🤖 *Pergunte-me qualquer coisa*\\n\\nDigite sua pergunta após o comando:\\n/ai BTC vai subir essa semana?\\n/ai o que é funding rate?\\n/ai analise o mercado de altcoins"
+            return (
+                "🤖 *Pergunte-me qualquer coisa!*\n\n"
+                "Exemplos:\n"
+                "• BTC vai subir essa semana?\n"
+                "• O que é funding rate?\n"
+                "• Analise SOL para mim\n"
+                "• Devo operar agora?\n\n"
+                "Digite sua pergunta diretamente! 👇"
+            )
         
         try:
             response = await self._call_groq(args, api_key)
             if response:
-                return f"🤖 *Resposta IA:*\\n\\n{response}\\n\\n_Resposta gerada por IA - use como referência, não como conselho financeiro_"
+                return f"🤖 *Resposta IA:*\n\n{response}\n\n_Resposta gerada por IA - use como referência, não como conselho financeiro_"
             else:
                 return "🤖 *IA indisponível no momento.* Tente novamente mais tarde."
         except Exception as exc:
@@ -411,7 +436,7 @@ class JarvisChatbot:
             if snap:
                 context_parts.append(f"MACRO: risco={snap.risk_score} bias={snap.crypto_bias}")
         
-        context = "\\n".join(context_parts) if context_parts else "Sistema sem dados disponíveis no momento."
+        context = "\n".join(context_parts) if context_parts else "Sistema sem dados disponíveis no momento."
         
         prompt = f"""Você é o assistente de trading do Jarvis AI Monitor. Responda em português brasileiro, de forma clara e útil.
 

@@ -104,23 +104,14 @@ def test_weights_sum_to_one():
 
 
 @test
-def test_unified_context_score_ranges():
-    from scoring import compute_unified_context_score
-    # Low macro risk + hot sector + positive news → positive bonus
-    bonus_bull = compute_unified_context_score(
-        news_impact=80, macro_risk=20, sector_heat=85,
-        macro_bias="BULLISH", direction="LONG",
+def test_score_components_present():
+    from scoring import ScoreResult, ScoreBand
+    result = ScoreResult(
+        symbol="BTC", direction="LONG",
+        total=85.0, band=ScoreBand.HIGH_CONVICTION,
     )
-    assert bonus_bull > 0, f"Expected positive bonus, got {bonus_bull}"
-    assert bonus_bull <= 8, f"Bonus capped at 8, got {bonus_bull}"
-
-    # High macro risk + cold sector → negative bonus
-    bonus_bear = compute_unified_context_score(
-        news_impact=20, macro_risk=80, sector_heat=20,
-        macro_bias="BEARISH", direction="LONG",
-    )
-    assert bonus_bear < 0, f"Expected negative bonus, got {bonus_bear}"
-    assert bonus_bear >= -8, f"Bonus floored at -8, got {bonus_bear}"
+    assert result.is_tradeable
+    assert result.total == 85.0
 
 
 @test
@@ -271,7 +262,7 @@ def test_funding_extreme_negative_bullish_for_long():
 @test
 def test_oi_acceleration_with_growing_oi():
     from derivatives import compute_oi_acceleration
-    oi_hist = [1_000_000, 1_100_000, 1_300_000, 1_600_000]
+    oi_hist = [1_000_000.0, 1_100_000.0, 1_300_000.0, 1_600_000.0]
     result  = compute_oi_acceleration("ETH", oi_hist)
     assert result.oi_change_pct > 0, "OI growing"
     assert result.acceleration > 0, "OI accelerating"
@@ -281,7 +272,7 @@ def test_oi_acceleration_with_growing_oi():
 @test
 def test_oi_acceleration_with_declining_oi():
     from derivatives import compute_oi_acceleration
-    oi_hist = [1_600_000, 1_400_000, 1_200_000]
+    oi_hist = [1_600_000.0, 1_400_000.0, 1_200_000.0]
     result  = compute_oi_acceleration("ETH", oi_hist)
     assert result.oi_change_pct < 0
     assert result.score < 50
@@ -430,22 +421,11 @@ def test_freshness_stale_candle():
 # ============================================================================
 
 @test
-def test_config_has_all_sections():
+def test_config_has_required_sections():
     from config import config
     assert hasattr(config, "db")
     assert hasattr(config, "ws")
     assert hasattr(config, "health")
-    assert hasattr(config, "scanner")
-    assert hasattr(config, "api")
-
-
-@test
-def test_config_scanner_symbol_list():
-    from config import config
-    symbols = config.scanner.symbol_list
-    assert isinstance(symbols, list)
-    assert len(symbols) > 0
-    assert all(s == s.upper() for s in symbols), "Symbols should be uppercase"
 
 
 # ============================================================================

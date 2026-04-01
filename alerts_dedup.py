@@ -90,16 +90,15 @@ class AlertDedupStore:
         key   = _make_key(symbol, direction)
         entry = await self._load(key)
 
-     if entry is None:
-         log.info(
-          "ALERT_SENT",
-           f"novo alerta {key} — enviando",
-           symbol=symbol, direction=direction, score=score,
-           )
-            return True, "NOVO"
+        if entry is None:
+            log.info(
+                "ALERT_SENT",
+                f"novo alerta {key} — enviando",
+                symbol=symbol, direction=direction, score=score,
+            )
             return True, "NEW"
 
-        now     = time.time()
+        now = time.time()
             
         elapsed = now - entry.last_sent_ts
         delta   = score - entry.last_score

@@ -32,6 +32,8 @@ ws_state = {
     "connected_at":        None,
 }
 
+ws_price_cache: dict = {}   # symbol -> price, populated by on_market_data
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

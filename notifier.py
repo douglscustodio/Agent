@@ -100,10 +100,10 @@ def _sentiment_pt(s: str) -> str:
   
 def _direction_badge(d: str) -> str:
     """Retorna badge visual para LONG/SHORT em português."""
-   if d.upper() == "LONG":
-      return "🔼 COMPRA LONGA"
-  else:
-       return "🔽 VENDA CURTA"
+    if d.upper() == "LONG":
+        return "🔼 COMPRA LONGA"
+    else:
+        return "🔽 VENDA CURTA"
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +177,8 @@ def _news_context_pt(title: str) -> str:
     return "notícia relevante"
 
 
-    # Se tiver URL, exibe como link clicável com domínio encurtado
-    url = getattr(article, "url", None) or getattr(article, "link", None)
-    if url:
-        url_display = _shorten_url(url)
-        return f"• {sentiment_emoji} [{title_short}...]({url}) _{context_pt}_ ({age_min}min)\n   🔗 {url_display}"
-      
+def _format_news_line(news_ctx: NewsContext) -> str:
+    """Formata uma linha de notícia para exibição no Telegram."""
     if not news_ctx or not news_ctx.articles:
         return ""
 
@@ -194,7 +190,6 @@ def _news_context_pt(title: str) -> str:
     age_min    = round(news_ctx.freshness_minutes)
     title_short = news_ctx.top_headline[:70]
 
-    # Se tiver URL, exibe como link clicável
     url = getattr(article, "url", None) or getattr(article, "link", None)
     if url:
         return f"• {sentiment_emoji} [{title_short}...]({url}) — _{context_pt}_ ({age_min}min)"
@@ -265,10 +260,13 @@ def _build_signal_message(
         direction = sig.direction.upper()
         score     = sig.score
         band      = sig.band
-        lines.append(f"{_direction_badge(direction)} — *{sym}/USDT*")        news_ctx  = news_map.get(sym)
+        lines.append(f"{_direction_badge(direction)} — *{sym}/USDT*")
+        news_ctx  = news_map.get(sym)
         price     = _get_price(sym)
         comp      = sig.components
         ai        = ai_map.get(sym)
+        sl        = 0.0
+        tp1       = 0.0
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"{_direction_emoji(direction)} *{sym}/USDT — {direction}*")
@@ -291,7 +289,7 @@ def _build_signal_message(
             lines.append(f"• Stop Loss: `${sl:,.5f}` ⛔ ({sl_pct:.1f}% de risco)")
             lines.append(f"• Alvo 1:   `${tp1:,.5f}` 🎯 (+{tp1_pct:.1f}%)")
             lines.append(f"• Alvo 2:   `${tp2:,.5f}` 🎯 (+{tp2_pct:.1f}%)")
-            lines.append(f"• Setor: {sector}")
+            lines.append(f"• Setor: {get_sector_label(sym)}")
             lines.append("")
 
         # UPGRADE: Explicação da IA em PT-BR
@@ -394,11 +392,13 @@ def _build_signal_message(
         lines.append("• Este é um sinal, não uma garantia de lucro")
         lines.append("")
 
+        sl_val = sl if 'sl' in dir() and price > 0 else 0
+        tp1_val = tp1 if 'tp1' in dir() and price > 0 else 0
         _daily_signals.append({
             "symbol": sym, "direction": direction,
             "score": score, "price": price,
-            "sl": sl if price > 0 else 0,
-            "tp1": tp1 if price > 0 else 0,
+            "sl": sl_val,
+            "tp1": tp1_val,
             "time": _now_br(),
         })
 

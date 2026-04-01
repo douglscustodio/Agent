@@ -345,10 +345,12 @@ async def main() -> None:
     ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
     await ctx.notifier.startup()
     ctx.notifier.set_news_engine(ctx.news_engine)
+    await ctx.notifier.send_system_alert(
         "🟢 *Crypto Monitor online*\nAll subsystems initialised. Scanner active."
     )
     log.info("SYSTEM_READY", "startup Telegram alert dispatched")
-# ── 6. Health server ─────────────────────────────────────────────────
+
+    # ── 6. Health server ─────────────────────────────────────────────────
     await run_health_server()
 
     # ── 7. WebSocket client ──────────────────────────────────────────────

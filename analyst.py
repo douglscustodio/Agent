@@ -1,17 +1,14 @@
 """
 analyst.py — Jarvis como Analista Profissional de Trading
 
-Este módulo transforma o Jarvis em um verdadeiro ANALISTA PROFISSIONAL
-que opera ao seu lado 24/7, como se tivesse um mentor de trading expert.
+Princípios:
+1. PREVISIVO - Antecipa movimentos antes que aconteçam
+2. CAUTELOSO - Sempre mostra os dois lados do mercado
+3. DIDÁTICO - Ensina o raciocínio por trás de cada análise
+4. ASSERTIVO - Diz claramente o que fazer, sem enrolação
 
-Características:
-- Comunicação de analista profissional (estilo Bloomberg/TradingView)
-- Explica o "PORQUÊ" por trás de cada decisão
-- Ensina gestão de risco e position sizing
-- Mantém perspectiva macro sempre presente
-- Oferece psicológico apoio durante volatilidade
-- Sugere pontos de entrada, saída e gestão de posição
-- Daily briefing estilo relatório de analistas
+O Jarvis não é só um bot de sinais - é um MENTOR que te ensina
+a pensar como um trader profissional.
 """
 
 import time
@@ -31,7 +28,7 @@ MARKET_PULSE_INTERVAL = 900
 
 @dataclass
 class TradeSetup:
-    """Setup de trade identificado."""
+    """Setup de trade com análise completa."""
     symbol: str
     direction: str
     score: float
@@ -42,6 +39,7 @@ class TradeSetup:
     position_size_advice: str
     reasoning: List[str]
     risk_reward: str
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -58,7 +56,10 @@ class MarketContext:
     risk_level: str
     key_levels: Dict[str, float]
     macro_events: List[str]
-    notable_news: List[str]
+    prediction: str
+    prediction_confidence: float
+    risk_factors: List[str]
+    opportunities: List[str]
 
 
 @dataclass
@@ -71,57 +72,80 @@ class AnalystState:
     current_positions: Dict[str, dict] = field(default_factory=dict)
     alerted_signals: Set[str] = field(default_factory=set)
     last_news_alerts: Dict[str, float] = field(default_factory=dict)
-    trading_lessons_delivered: Set[str] = field(default_factory=set)
+    market_predictions: List[str] = field(default_factory=list)
 
 
 class TradingAnalyst:
     """
-    Jarvis como Analista Profissional de Trading.
+    Jarvis como Analista Profissional.
     
-    Este módulo transforma alertas técnicos em lições de trading,
-    explicando o raciocínio por trás de cada recomendação.
+    CARACTERÍSTICAS:
+    - PREVISIVO: Antecipa o que vai acontecer
+    - CAUTELOSO: Sempre mostra riscos
+    - DIDÁTICO: Explica o porquê de tudo
+    - ASSERTIVO: Diz exatamente o que fazer
     """
     
     def __init__(self):
         self._state = AnalystState()
-        self._lessons = self._load_trading_lessons()
-        self._market_sayings = self._load_market_sayings()
+        self._market_wisdom = self._load_market_wisdom()
+        self._trading_rules = self._load_trading_rules()
     
     def _now(self) -> float:
         return time.time()
     
-    def _load_trading_lessons(self) -> List[str]:
-        """Lições de trading para entregar organicamente."""
+    def _load_market_wisdom(self) -> List[Dict]:
+        """Sabedoria de mercado para ensinar."""
         return [
-            "Lembre-se: o mercado paga para dar a razão aos pacientes.",
-            "Proteja seu capital primeiro. Lucros vêm depois.",
-            "Não é sobre acertar todos os trades - é sobre gerenciar risco.",
-            "A tendência é sua amiga até o final. - Jesse Livermore",
-            "Quando você não tem certeza, o melhor trade é não fazer nenhum.",
-            "Corte perdas rapidamente, deixe lucros correrem.",
-            "Volatilidade não é risco - não gerenciar risco é risco.",
-            "O pior inimigo do trader é ele mesmo.",
-            "Não opere por medo de perder. Opera por convicção.",
-            "Cada trade é uma lição. Aprenda com os erros.",
+            {
+                "topic": "tendência",
+                "lesson": "A tendência é sua amiga. Nunca lucre contra a tendência principal.",
+                "action": "Identifique a tendência primeiro, depois procure entradas a favor."
+            },
+            {
+                "topic": "suporte_resistência",
+                "lesson": "Suporte é onde compradores entram. Resistência é onde vendedores entram.",
+                "action": "Em tendências de alta,-buy em suportes. Em baixas, venden em resistências."
+            },
+            {
+                "topic": "funding",
+                "lesson": "Funding alto = muitos longos no mercado = risco de squeeze.",
+                "action": "Quando funding > 0.01%, cuidado com posições longas."
+            },
+            {
+                "topic": "volatilidade",
+                "lesson": "Alta volatilidade = oportunidades E perigos.",
+                "action": "Reduza tamanho em dias de alta volatilidade."
+            },
+            {
+                "topic": "notícias",
+                "lesson": "Não negocie notícias - espere o mercado digerir.",
+                "action": "Após notícias grandes, espere 1-2h para entrar."
+            },
+            {
+                "topic": "regime",
+                "lesson": "Cada regime pede estratégia diferente.",
+                "action": "Tendência = seguir. Lateral = range. Indeciso = esperar."
+            },
         ]
     
-    def _load_market_sayings(self) -> List[str]:
-        """Provérbios de mercado."""
+    def _load_trading_rules(self) -> List[str]:
+        """Regras inegociáveis de trading."""
         return [
-            "Bulls make money, bears make money, pigs get slaughtered.",
-            "Buy the rumor, sell the news.",
-            "Don't fight the tape.",
-            "The trend is your friend until the end.",
-            "Markets can remain irrational longer than you can remain solvent.",
-            "Cut your losses, let your winners ride.",
-            "Never risk more than 1-2% on a single trade.",
-            "If you can't afford to lose, you can't afford to win.",
+            "1. Nunca arrisque mais de 2% do capital em um trade",
+            "2. Stop loss é sagrado - SEMPRE defina antes de entrar",
+            "3. Se o setup não está claro, NÃO ENTRE",
+            "4. Deixe lucros correrem, corte perdas rápido",
+            "5. Não adicione a posições perdedoras",
+            "6. A tendência é maior que qualquer indicador",
+            "7. Funding alto = perigo para longos",
+            "8. Não persiga perdas - aceite e siga em frente",
         ]
     
     def set_current_position(self, symbol: str, direction: str, entry_price: float, 
                            entry_time: float = None, stop_loss: float = None,
                            take_profit: float = None) -> None:
-        """Registra uma posição atual para acompanhamento."""
+        """Registra posição para acompanhamento."""
         self._state.current_positions[symbol] = {
             "symbol": symbol,
             "direction": direction,
@@ -135,21 +159,21 @@ class TradingAnalyst:
         elapsed = self._now() - self._state.last_pulse_time
         return elapsed >= MARKET_PULSE_INTERVAL
     
-    def _is_high_impact_news(self, title: str, sentiment: str) -> bool:
-        """Determina se notícia merece atenção de analista."""
+    def _is_high_impact_news(self, title: str) -> bool:
+        """Notícias que mudam o jogo."""
         title_lower = title.lower()
-        high_impact = [
-            "fed", "federal reserve", "rate", "interest",
-            "sec", "etf", "approval", "institutional",
+        keywords = [
+            "fed", "federal reserve", "rate hike", "rate cut",
+            "sec", "etf approval", "etf rejection",
             "hack", "exploit", "ban", "regulation",
-            "crash", "surge", "breakout", "breakdown",
-            "blackrock", "fidelity", "massive", "critical",
+            "crash", "black swan", "bailout",
+            "institutional", "blackrock", "massive",
         ]
-        return any(kw in title_lower for kw in high_impact)
+        return any(kw in title_lower for kw in keywords)
     
     def analyze_market(self, btc_price: float, btc_closes: List[float],
                       regime_result, macro_snap = None) -> MarketContext:
-        """Analisa contexto completo do mercado."""
+        """Análise completa do mercado com PREVISÃO."""
         
         change_1h = 0.0
         change_4h = 0.0
@@ -169,26 +193,54 @@ class TradingAnalyst:
         regime_adx = regime_result.adx if regime_result else 0
         
         sentiment = "NEUTRAL"
-        if change_1h > 1.5:
-            sentiment = "BULLISH"
-        elif change_1h < -1.5:
-            sentiment = "BEARISH"
+        momentum = "LATERAL"
         
-        risk_level = "LOW"
+        if change_1h > 2:
+            sentiment = "BULLISH"
+            momentum = "SUBIDA"
+        elif change_1h < -2:
+            sentiment = "BEARISH"
+            momentum = "QUEDA"
+        
+        if change_4h > 5:
+            momentum = "FORTE ALTA"
+        elif change_4h < -5:
+            momentum = "FORTE QUEDA"
+        
+        risk_level = "BAIXO"
+        risk_factors = []
+        opportunities = []
+        
         if macro_snap:
             risk_score = getattr(macro_snap, "risk_score", 50)
             if risk_score >= 75:
-                risk_level = "HIGH"
+                risk_level = "ALTO"
+                risk_factors.append("Risco macro elevado - cautela redobrada")
             elif risk_score >= 60:
-                risk_level = "MEDIUM"
+                risk_level = "MODERADO"
+                risk_factors.append("Risco moderado - gestão de risco essencial")
+        
+        if abs(change_1h) > 3:
+            risk_factors.append("Movimento brusco - pode reverter ou continuar")
+            opportunities.append("Aguardar confirmação após movimento")
+        
+        if regime_adx > 25:
+            opportunities.append("Tendência definida - procurar entradas a favor")
+        elif regime_adx < 20:
+            risk_factors.append("Mercado sem direção - não force trades")
+        
+        prediction, confidence = self._make_prediction(
+            change_1h, change_4h, change_24h, regime_str, regime_adx
+        )
         
         key_levels = self._calculate_key_levels(btc_price, btc_closes)
         
         macro_events = []
-        notable_news = []
         if macro_snap:
             for event in getattr(macro_snap, "events", [])[:3]:
-                macro_events.append(getattr(event, "title", ""))
+                title = getattr(event, "title", "")
+                if title:
+                    macro_events.append(title)
         
         return MarketContext(
             btc_price=btc_price,
@@ -202,21 +254,66 @@ class TradingAnalyst:
             risk_level=risk_level,
             key_levels=key_levels,
             macro_events=macro_events,
-            notable_news=notable_news,
+            prediction=prediction,
+            prediction_confidence=confidence,
+            risk_factors=risk_factors,
+            opportunities=opportunities,
         )
     
-    def _calculate_key_levels(self, price: float, closes: List[float]) -> Dict[str, float]:
-        """Calcula níveis técnicos importantes."""
-        if not closes:
-            return {}
+    def _make_prediction(self, change_1h: float, change_4h: float, 
+                       change_24h: float, regime: str, adx: float) -> tuple:
+        """Faz previsão baseada em múltiplos fatores."""
         
-        highs = max(closes) if closes else price
-        lows = min(closes) if closes else price
+        predictions = []
+        confidence = 0.5
+        
+        if regime == "TRENDING" and adx > 30:
+            if change_1h > 0:
+                predictions.append("Tendência de alta pode continuar")
+                confidence = 0.7
+            else:
+                predictions.append("Possível pullback dentro da tendência de alta")
+                confidence = 0.6
+        
+        elif regime == "RANGING":
+            predictions.append("Mercado lateral - sem direção clara")
+            predictions.append("Procurar setups em extremos do range")
+            confidence = 0.5
+        
+        elif regime == "WEAK":
+            predictions.append("Mercado indeciso - AGUARDAR")
+            predictions.append("Não force entradas sem confirmação")
+            confidence = 0.4
+        
+        if abs(change_1h) > 3:
+            predictions.append("Movimento brusco detectado - cautela")
+            confidence = min(confidence, 0.5)
+        
+        if change_24h > 10:
+            predictions.append("BTC subiu muito em 24h - risco de correção")
+            predictions.append("Não compre em alta extrema")
+        elif change_24h < -10:
+            predictions.append("BTC caiu muito em 24h - pode ter fundo")
+            predictions.append("Aguarde confirmação antes de comprar")
+        
+        return " | ".join(predictions[:2]), confidence
+    
+    def _calculate_key_levels(self, price: float, closes: List[float]) -> Dict[str, float]:
+        """Calcula níveis importantes."""
+        if not closes:
+            return {"current": price}
+        
+        highs = max(closes[-20:]) if len(closes) >= 20 else max(closes)
+        lows = min(closes[-20:]) if len(closes) >= 20 else min(closes)
+        avg = sum(closes[-20:]) / min(len(closes), 20)
         
         return {
-            "resistance_1": highs * 0.99 if highs > price else price * 1.02,
-            "support_1": lows * 1.01 if lows < price else price * 0.98,
+            "resistance_1": highs,
+            "support_1": lows,
             "current": price,
+            "average_20": avg,
+            "range_high": highs,
+            "range_low": lows,
         }
     
     def should_alert_regime_change(self, new_regime: str) -> bool:
@@ -237,35 +334,37 @@ class TradingAnalyst:
     
     def get_trade_setup(self, symbol: str, direction: str, score: float,
                        current_price: float, volatility: float = 0.02) -> TradeSetup:
-        """Gera setup completo de trade com gestão."""
+        """Gera setup CAUTELOSO com todos os riscos."""
         
-        risk_pct = 2.0
+        warnings = []
         
         if direction == "LONG":
-            stop_pct = volatility * 2
+            stop_pct = max(volatility * 2, 0.015)
             stop_price = current_price * (1 - stop_pct)
             tp1_price = current_price * (1 + stop_pct)
             tp2_price = current_price * (1 + stop_pct * 2.5)
-            entry_zone = f"${current_price:,.2f} - ${current_price * 1.005:,.2f}"
+            entry_zone = f"${current_price:,.2f} - ${current_price * 1.003:,.2f}"
         else:
-            stop_pct = volatility * 2
+            stop_pct = max(volatility * 2, 0.015)
             stop_price = current_price * (1 + stop_pct)
             tp1_price = current_price * (1 - stop_pct)
             tp2_price = current_price * (1 - stop_pct * 2.5)
-            entry_zone = f"${current_price:,.2f} - ${current_price * 0.995:,.2f}"
+            entry_zone = f"${current_price:,.2f} - ${current_price * 0.997:,.2f}"
         
-        risk_reward = "1:2.5"
+        if volatility > 0.03:
+            warnings.append("⚠️ Volatilidade ELEVADA - reduza tamanho da posição")
         
         reasoning = []
         if score >= 80:
-            reasoning.append("Setup de alta qualidade -(edge confirmado)")
+            reasoning.append("✓ Setup de ALTA qualidade - edge confirmado")
+            reasoning.append("✓ Condições idéais para entrada")
         elif score >= 65:
-            reasoning.append("Setup válido - aguarde confirmação")
+            reasoning.append("✓ Setup válido - possui edge")
+        else:
+            reasoning.append("○ Setup moderado - aguarde melhor preço")
+            warnings.append("⚠️ Score moderado - não force entrada")
         
-        if volatility > 0.03:
-            reasoning.append("⚠️ Volatilidade elevada - reduza tamanho")
-        
-        reasoning.append(f"Risco máximo: {risk_pct}% do capital")
+        reasoning.append(f"✓ Stop em {stop_pct*100:.1f}% - risco controlado")
         
         return TradeSetup(
             symbol=symbol,
@@ -275,9 +374,10 @@ class TradingAnalyst:
             stop_loss=f"${stop_price:,.2f} ({stop_pct*100:.1f}%)",
             take_profit_1=f"${tp1_price:,.2f}",
             take_profit_2=f"${tp2_price:,.2f}",
-            position_size_advice=f"Máx {risk_pct}% do capital por trade",
+            position_size_advice="Máx 2% do capital",
             reasoning=reasoning,
-            risk_reward=risk_reward,
+            risk_reward="1:2.5",
+            warnings=warnings,
         )
 
 
@@ -286,166 +386,175 @@ class TradingAnalyst:
 # ============================================================================
 
 def format_daily_briefing(context: MarketContext, top_signals: List = None) -> str:
-    """Relatório diário estilo analista profissional."""
+    """RELATÓRIO COMPLETO - Como um analista profissional你看."""
+    
+    emoji = "🟢" if context.sentiment == "BULLISH" else ("🔴" if context.sentiment == "BEARISH" else "⚪")
     
     lines = [
-        "📊 *RELATÓRIO DIÁRIO DO MERCADO*",
+        "📊 *RELATÓRIO DIÁRIO*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y às %H:%M UTC')}_",
         "",
-        "━" * 30,
+        "═" * 32,
+        "",
+        f"*PREÇO ATUAL:* ${context.btc_price:,.2f}",
         "",
     ]
     
-    emoji_dir = "🟢" if context.sentiment == "BULLISH" else ("🔴" if context.sentiment == "BEARISH" else "⚪")
-    sentiment_pt = {"BULLISH": "ALTISTA", "BEARISH": "BAIXISTA", "NEUTRAL": "NEUTRO"}.get(context.sentiment, "NEUTRO")
-    
-    lines.append(f"*{emoji_dir} VISÃO GERAL*")
-    lines.append(f"BTC: ${context.btc_price:,.2f}")
-    lines.append(f"Variação 1h: {context.btc_change_1h:+.2f}%")
-    lines.append(f"Variação 4h: {context.btc_change_4h:+.2f}%")
-    lines.append(f"Variação 24h: {context.btc_change_24h:+.2f}%")
-    lines.append(f"Sentimento: {sentiment_pt}")
+    lines.append("*VARIAÇÕES:*")
+    lines.append(f"  1 hora:  {context.btc_change_1h:+.2f}%")
+    lines.append(f"  4 horas: {context.btc_change_4h:+.2f}%")
+    lines.append(f"  24 horas: {context.btc_change_24h:+.2f}%")
     lines.append("")
     
-    regime_pt = {
-        "TRENDING": "EM TENDÊNCIA 📈",
-        "RANGING": "LATERALIZANDO ↔️",
-        "WEAK": "SEM DIREÇÃO 🔄",
-    }.get(context.regime, context.regime)
+    regime_emoji = "📈" if context.regime == "TRENDING" else ("↔️" if context.regime == "RANGING" else "🔄")
+    regime_pt = {"TRENDING": "TENDÊNCIA", "RANGING": "LATERAL", "WEAK": "INDECISÃO"}.get(context.regime, "???")
     
-    dir_pt = {"UP": "Alta", "DOWN": "Queda", "NEUTRAL": "Neutro"}.get(context.regime_direction, "")
-    
-    lines.append("━" * 30)
+    lines.append("═" * 32)
     lines.append("")
-    lines.append("*📐 ANÁLISE TÉCNICA*")
-    lines.append(f"Regime: {regime_pt}")
-    lines.append(f"Direção: {dir_pt}")
-    lines.append(f"Força (ADX): {context.regime_strength:.1f}")
+    lines.append(f"*{regime_emoji} SITUAÇÃO TÉCNICA*")
+    lines.append(f"  Regime: {regime_pt}")
+    lines.append(f"  Direção: {context.regime_direction}")
+    lines.append(f"  Força (ADX): {context.regime_strength:.0f}/100")
+    lines.append("")
     
     if context.key_levels:
-        lines.append("")
-        lines.append("*Níveis Importantes:*")
+        lines.append("*📍 NÍVEIS IMPORTANTES:*")
         lines.append(f"  Resistência: ${context.key_levels.get('resistance_1', 0):,.2f}")
         lines.append(f"  Suporte: ${context.key_levels.get('support_1', 0):,.2f}")
+        lines.append(f"  Média 20: ${context.key_levels.get('average_20', 0):,.2f}")
+        lines.append("")
     
+    lines.append("═" * 32)
     lines.append("")
-    lines.append("━" * 30)
+    lines.append("*🔮 MINHA PREVISÃO:*")
+    lines.append(f"  {context.prediction}")
+    lines.append(f"  Confiança: {context.prediction_confidence*100:.0f}%")
     lines.append("")
     
-    risk_emoji = "🔴" if context.risk_level == "HIGH" else ("🟡" if context.risk_level == "MEDIUM" else "🟢")
-    lines.append(f"*{risk_emoji} NÍVEL DE RISCO:* {context.risk_level}")
+    if context.risk_factors:
+        lines.append("*⚠️ FATORES DE RISCO:*")
+        for rf in context.risk_factors:
+            lines.append(f"  • {rf}")
+        lines.append("")
+    
+    if context.opportunities:
+        lines.append("*🎯 OPORTUNIDADES:*")
+        for op in context.opportunities:
+            lines.append(f"  • {op}")
+        lines.append("")
     
     if context.macro_events:
+        lines.append("═" * 32)
         lines.append("")
-        lines.append("*🌍 CONTEXTO MACRO:*")
+        lines.append("*🌍 EVENTOS MACRO:*")
         for event in context.macro_events[:2]:
             if event:
-                lines.append(f"• {event[:60]}...")
+                lines.append(f"  • {event[:60]}...")
+        lines.append("")
     
     if top_signals:
+        lines.append("═" * 32)
         lines.append("")
-        lines.append("━" * 30)
-        lines.append("")
-        lines.append("*🎯 OPORTUNIDADES IDENTIFICADAS*")
+        lines.append("*📈 SETUPS IDENTIFICADOS:*")
         for sig in top_signals[:3]:
-            emoji = "📈" if sig.direction == "LONG" else "📉"
-            lines.append(f"{emoji} *{sig.symbol}/USDT* - {sig.direction}")
-            lines.append(f"   Score: {sig.score:.0f}/100")
-            lines.append("")
+            emoji_s = "📈" if sig.direction == "LONG" else "📉"
+            quality = "🔥" if sig.score >= 75 else ("✅" if sig.score >= 60 else "⚠️")
+            lines.append(f"{emoji_s} {sig.symbol}/USDT {sig.direction} {quality} {sig.score:.0f}")
+        lines.append("")
     
-    lines.append("━" * 30)
+    lines.append("═" * 32)
     lines.append("")
-    lines.append("*💡 DICA DO ANALISTA:*")
-    lines.append(f"_{random.choice([
-        'Lembre-se: paciência é virtue no trading.',
-        'Não persiga perdas - aceite e siga em frente.',
-        'A tendência é sua amiga até o final.',
-        'Proteja seu capital antes de buscar lucros.',
-        'O mercado estará lá amanhã - não force operações.',
-    ])}_")
+    lines.append("*💡 REGRA DE OURO:*")
+    lines.append("  " + random.choice([
+        "Se não tem certeza, NÃO ENTRE.",
+        "Paciência é virtue. Aguarde o setup perfeito.",
+        "Proteja o capital. Lucros vêm depois.",
+        "A tendência é maior que qualquer indicador.",
+        "Não persiga perdas. Aceitar é trading.",
+    ]))
     lines.append("")
-    lines.append("_Jarvis AI Trading Monitor_")
+    lines.append("_Jarvis - Seu Analista de Trading_")
     
     return "\n".join(lines)
 
 
 def format_market_pulse(context: MarketContext, signal_alert: str = None) -> str:
-    """Pulso rápido do mercado - atualização periódica."""
+    """Pulso rápido - atualização periódica."""
     
     emoji = "🟢" if context.sentiment == "BULLISH" else ("🔴" if context.sentiment == "BEARISH" else "⚪")
+    regime_emoji = "📈" if context.regime == "TRENDING" else ("↔️" if context.regime == "RANGING" else "🔄")
     
     lines = [
-        f"📊 *PULSO DO MERCADO* {emoji}",
+        f"📊 *PULSO* {emoji}",
         f"_{datetime.now(timezone.utc).strftime('%H:%M UTC')}_",
         "",
-        f"BTC: ${context.btc_price:,.2f} ({context.btc_change_1h:+.2f}%)",
-        f"Regime: {context.regime} | ADX: {context.regime_strength:.0f}",
+        f"BTC: ${context.btc_price:,.2f}",
+        f"1h: {context.btc_change_1h:+.1f}% | {regime_emoji} {context.regime}",
+        f"ADX: {context.regime_strength:.0f} | Risco: {context.risk_level}",
     ]
+    
+    if context.prediction:
+        lines.append("")
+        lines.append(f"🔮 {context.prediction[:60]}")
     
     if signal_alert:
         lines.append("")
-        lines.append(f"*{signal_alert}*")
+        lines.append(f"📢 {signal_alert}")
     
     lines.append("")
-    lines.append("_Próximo pulso em 15min_")
+    lines.append("_Jarvis_")
     
     return "\n".join(lines)
 
 
 def format_regime_change_alert(previous: str, new: str, direction: str, 
                                strength: float, advice: str = None) -> str:
-    """Alerta de mudança de regime com análise."""
+    """⚡ ALERTA: Mudança de regime - MUITO IMPORTANTE."""
     
-    new_pt = {
-        "TRENDING": "📈 TENDÊNCIA ESTABELECIDA",
-        "RANGING": "↔️ LATERALIZAÇÃO",
-        "WEAK": "🔄 INDECISÃO",
-    }.get(new, new)
-    
-    dir_pt = {"UP": "para ALTA", "DOWN": "para BAIXA", "NEUTRAL": "sem direção"}.get(direction, "")
+    new_pt = {"TRENDING": "📈 TENDÊNCIA", "RANGING": "↔️ LATERAL", "WEAK": "🔄 INDECISÃO"}.get(new, new)
+    previous_pt = {"TRENDING": "tendência", "RANGING": "lateral", "WEAK": "indecisão"}.get(previous, previous)
     
     lines = [
-        "⚡ *ANÁLISE: MUDANÇA DE REGIME*",
+        "⚡ *ALERTA: MERCADO MUDOU!*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
-        f"O mercado mudou de *{previous}* para *{new_pt}*",
-        f"Direção identificada: *{dir_pt}*",
-        f"Força da tendência (ADX): *{strength:.1f}*",
+        f"O mercado saiu de *{previous_pt}* para *{new_pt}*",
+        f"Direção: *{direction}* | Força: *{strength:.0f}*",
         "",
     ]
     
     if new == "TRENDING":
-        lines.append("*📚 MINHA ANÁLISE:*")
-        lines.append("Tendência definida = maior probabilidade de sucesso.")
-        lines.append("Procure entradas no sentido da tendência.")
-        lines.append("Stops podem ser mais apertados.")
+        lines.append("*📈 MINHA ANÁLISE:*")
+        lines.append("Tendência definida = maior probabilidade.")
+        lines.append("Procure entradas a FAVOR da tendência.")
+        lines.append("Stops mais apertados podem funcionar.")
     elif new == "RANGING":
-        lines.append("*📚 MINHA ANÁLISE:*")
-        lines.append("Mercado lateral = sem direção clara.")
-        lines.append("Melhor operar nos extremos do range.")
-        lines.append("Considere reduz o tamanho das posições.")
+        lines.append("*↔️ MINHA ANÁLISE:*")
+        lines.append("Mercado sem direção clara.")
+        lines.append("OPERE NOS EXTREMOS do range.")
+        lines.append("Reduza tamanho das posições.")
     else:
-        lines.append("*📚 MINHA ANÁLISE:*")
-        lines.append("Mercado indeciso = aguardar.")
-        lines.append("Não force entradas sem confirmação.")
-        lines.append("Paciência é fundamental aqui.")
+        lines.append("*🔄 MINHA ANÁLISE:*")
+        lines.append("Mercado indeciso = AGUARDAR.")
+        lines.append("NÃO FORCE entradas agora.")
+        lines.append("Paciência. O mercado vai dar sinal.")
     
     if advice:
         lines.append("")
-        lines.append(f"*🎯 RECOMENDAÇÃO:* {advice}")
+        lines.append(f"*🎯 AÇÃO:* {advice}")
     
     lines.append("")
-    lines.append("_Jarvis AI Trading Monitor_")
+    lines.append("_Jarvis - Seu Analista_")
     
     return "\n".join(lines)
 
 
 def format_signal_with_education(symbol: str, direction: str, score: float,
-                                setup: TradeSetup, news_context: str = None) -> str:
-    """Signal formatado com educação de trading."""
+                                setup: TradeSetup, lesson: str = None) -> str:
+    """Signal completo COM EDUCAÇÃO - estilo professor."""
     
     emoji = "📈" if direction == "LONG" else "📉"
-    quality = "ALTA QUALIDADE 🔥" if score >= 75 else ("QUALIDADE BOA ✅" if score >= 60 else "MODERADO ⚠️")
+    quality = "🔥 QUALIDADE ALTA" if score >= 75 else ("✅ BOA QUALIDADE" if score >= 60 else "⚠️ MODERADA")
     
     lines = [
         f"{emoji} *ANÁLISE: {symbol}/USDT*",
@@ -454,79 +563,75 @@ def format_signal_with_education(symbol: str, direction: str, score: float,
         f"*Direção:* {direction}",
         f"*Score:* {score:.0f}/100 ({quality})",
         "",
-        "━" * 25,
+        "━" * 28,
         "",
-        "*📐 SETUP COMPLETO:*",
+        "*📐 PLANO DE TRADE:*",
         "",
-        f"📍 *Zona de Entrada:* {setup.entry_zone}",
-        f"🛑 *Stop Loss:* {setup.stop_loss}",
-        f"🎯 *TP1:* {setup.take_profit_1}",
-        f"🎯 *TP2:* {setup.take_profit_2}",
-        f"⚖️ *Risk/Reward:* {setup.risk_reward}",
+        f"  📍 Entrada: {setup.entry_zone}",
+        f"  🛑 Stop Loss: {setup.stop_loss}",
+        f"  🎯 TP1: {setup.take_profit_1}",
+        f"  🎯 TP2: {setup.take_profit_2}",
+        f"  ⚖️ R/R: {setup.risk_reward}",
+        f"  💰 Size: {setup.position_size_advice}",
         "",
-        "*💰 GESTÃO DE POSIÇÃO:*")
+    ]
     
-    for reason in setup.reasoning:
-        lines.append(f"• {reason}")
-    
-    if news_context:
+    if setup.warnings:
+        lines.append("*⚠️ CUIDADO:*")
+        for w in setup.warnings:
+            lines.append(f"  {w}")
         lines.append("")
-        lines.append(f"*📰 CONTEXTO:* {news_context[:80]}...")
+    
+    lines.append("*✅ PORQUÊ DESTE SETUP:*")
+    for r in setup.reasoning:
+        lines.append(f"  {r}")
+    lines.append("")
+    
+    if lesson:
+        lines.append("━" * 28)
+        lines.append("")
+        lines.append(f"*📚 LIÇÃO:* {lesson}")
     
     lines.append("")
-    lines.append("━" * 25)
-    lines.append("")
-    lines.append("*📚 PORQUÊ DESTE SETUP:*")
-    
-    if direction == "LONG":
-        if score >= 75:
-            lines.append("Este ativo está demonstrando força contra o BTC.")
-            lines.append("Parabéns por identificar esta oportunidade!")
-        else:
-            lines.append("Setup válido mas aguarde melhor entrada.")
-    else:
-        if score >= 75:
-            lines.append("Este ativo está mostrando fraqueza relativa.")
-            lines.append("Cuidado com shorts - gerencie risco!")
-        else:
-            lines.append("Setup de curto - não force.")
-    
-    lines.append("")
-    lines.append("_Use /ai para perguntar sobre este setup_")
+    lines.append("_Jarvis - Seu Analista_")
     
     return "\n".join(lines)
 
 
-def format_important_news_alert(title: str, sentiment: str, impact: str,
+def format_important_news_alert(title: str, sentiment: str, 
                                trading_advice: str = None) -> str:
-    """Alerta de notícia com impacto no trading."""
+    """Notícia importante com IMPACTO no trading."""
     
     emoji = "🟢" if sentiment == "positive" else ("🔴" if sentiment == "negative" else "⚪")
-    impact_emoji = "🔴" if impact == "HIGH" else ("🟡" if impact == "MEDIUM" else "⚪")
     
     lines = [
-        f"{emoji} *NOTÍCIA RELEVANTE* {impact_emoji}",
+        f"{emoji} *NOTÍCIA COM IMPACTO*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
-        f"_{title[:200]}_",
+        f"_{title[:180]}_",
         "",
     ]
     
     if trading_advice:
-        lines.append("*🎯 IMPACTO NO TRADING:*")
+        lines.append("*🎯 O QUE FAZER:*")
         lines.append(trading_advice)
     else:
         if sentiment == "negative":
-            lines.append("*🎯 IMPACTO:*")
-            lines.append("Notícia negativa pode pressionar preços.")
-            lines.append("Considere proteção adicional em posições.")
+            lines.append("*🎯 O QUE FAZER:*")
+            lines.append("Notícia negativa = cautela.")
+            lines.append("Proteja posições longas.")
+            lines.append("Não compre agora.")
         elif sentiment == "positive":
-            lines.append("*🎯 IMPACTO:*")
-            lines.append("Notícia positiva pode impulsionar alta.")
-            lines.append("Fique atento a entradas no viés comprador.")
+            lines.append("*🎯 O QUE FAZER:*")
+            lines.append("Notícia positiva = possível alta.")
+            lines.append("Fique atento a entradas.")
+        else:
+            lines.append("*🎯 O QUE FAZER:*")
+            lines.append("Aguarde o mercado digerir.")
+            lines.append("Não entre imediatamente.")
     
     lines.append("")
-    lines.append("_Jarvis AI Trading Monitor_")
+    lines.append("_Jarvis - Seu Analista_")
     
     return "\n".join(lines)
 
@@ -534,23 +639,21 @@ def format_important_news_alert(title: str, sentiment: str, impact: str,
 def format_trade_management_alert(symbol: str, direction: str, 
                                   entry_price: float, current_price: float,
                                   trade_hours: float, advice: str) -> str:
-    """Alerta de gestão de trade ativo."""
+    """Alerta de gestão - COMO UM MENTOR."""
     
     emoji = "📈" if direction == "LONG" else "📉"
-    
     pnl_pct = ((current_price - entry_price) / entry_price) * 100
     pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
     
     lines = [
-        f"📋 *GESTÃO DE TRADE*",
+        f"📋 *GESTÃO: {symbol}*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
-        f"{emoji} *{symbol}/USDT* - {direction}",
+        f"{emoji} {direction} | {trade_hours:.1f}h no trade",
         "",
-        f"*Entrada:* ${entry_price:,.2f}",
-        f"*Atual:* ${current_price:,.2f}",
-        f"*P&L:* {pnl_emoji} {pnl_pct:+.2f}%",
-        f"*Tempo:* {trade_hours:.1f}h",
+        f"  Entrada: ${entry_price:,.2f}",
+        f"  Atual:   ${current_price:,.2f}",
+        f"  P&L:     {pnl_emoji} {pnl_pct:+.2f}%",
         "",
     ]
     
@@ -558,65 +661,87 @@ def format_trade_management_alert(symbol: str, direction: str,
     lines.append(advice)
     
     lines.append("")
-    lines.append("_Jarvis AI Trading Monitor_")
+    lines.append("_Jarvis - Seu Analista_")
     
     return "\n".join(lines)
 
 
-def format_psychology_reminder(context: str = None) -> str:
-    """Lembrete de psicologia de trading."""
-    
-    reminders = [
-        "*🧠 LEMBRETE:*\n\nO mercado vai fazer tudo para tirar você de sua posição. Mantenha a calma e siga seu plano.",
-
-        "*🧠 CONTROLE EMOCIONAL:*\n\nNão deixe o medo ou ganância guiar suas decisões. Trading é gerenciamento de probabilidade.",
-
-        "*🧠 DISCIPLINA:*\n\nVocê não precisa operar todos os dias. As melhores oportunidades aparecem - esteja lá quando aparecerem.",
-
-        "*🧠 PERSPECTIVA:*\n\nUma perda não define sua carreira como trader. O que importa é Consistency + Risk Management.",
-
-        "*🧠 PACIÊNCIA:*\n\nOs maiores lucros vêm de esperar a configuração perfeita. Não force trades.",
-    ]
-    
-    return random.choice(reminders)
-
-
 def format_exit_signal(symbol: str, direction: str, reason: str,
                       pnl_if_closed: float = None) -> str:
-    """Signal de saída com explicação."""
+    """Sinal de saída - DIRETO E ASSERTIVO."""
     
     lines = [
-        "🚨 *SINAL DE SAÍDA DETECTADO*",
+        "🚨 *SAIA DESTE TRADE!*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
-        f"*{symbol}/USDT* - {direction}",
-        "",
-        "*⚠️ MOTIVO:*",
-        reason,
+        f"*{symbol} - {direction}*",
         "",
     ]
     
     if pnl_if_closed is not None:
         emoji = "🟢" if pnl_if_closed >= 0 else "🔴"
-        lines.append(f"*P&L se sair agora:* {emoji} {pnl_if_closed:+.2f}%")
+        lines.append(f"P&L se sair: {emoji} {pnl_if_closed:+.2f}%")
         lines.append("")
     
-    lines.append("*🎯 MINHA RECOMENDAÇÃO:*")
+    lines.append("*⚠️ MOTIVO:*")
+    lines.append(reason)
+    lines.append("")
     
-    if "regime" in reason.lower() or "mudou" in reason.lower():
-        lines.append("O regime mudou contra sua posição.")
-        lines.append("Considere realizar ou ajustar stop.")
-        lines.append("Não insista contra a tendência.")
-    elif "funding" in reason.lower() or "squeeze" in reason.lower():
-        lines.append("Funding extremo detectado.")
-        lines.append("Risco de liquidação de posições.")
-        lines.append("Proteja seu capital.")
+    lines.append("*🎯 AÇÃO AGORA:*")
+    if "regime" in reason.lower():
+        lines.append("1. Pare de adicionar posição")
+        lines.append("2. Ajuste stop para breakeven")
+        lines.append("3. Considere realizar parcialmente")
+    elif "funding" in reason.lower():
+        lines.append("1. Saia de posições longas AGORA")
+        lines.append("2. Risco de long squeeze é alto")
+        lines.append("3. Aguarde funding normalizar")
     else:
-        lines.append("Condições originais do setup mudaram.")
-        lines.append("守る (shinu) - know when to fold.")
+        lines.append("1. Reveja seu plano")
+        lines.append("2. Stop loss deve ser respeitado")
+        lines.append("3. Não insista no erro")
     
     lines.append("")
-    lines.append("_Jarvis AI Trading Monitor_")
+    lines.append("_Jarvis - Seu Analista_")
+    
+    return "\n".join(lines)
+
+
+def format_caution_alert(reason: str, advice: str) -> str:
+    """Alerta de cautela - MUITO IMPORTANTE."""
+    
+    lines = [
+        "⚠️ *ATENÇÃO!*",
+        f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
+        "",
+        f"*MOTIVO:* {reason}",
+        "",
+        "*🎯 O QUE FAZER:*",
+        advice,
+        "",
+        "_Jarvis - Seu Analista_",
+    ]
+    
+    return "\n".join(lines)
+
+
+def format_learning_moment(topic: str, lesson: str, action: str) -> str:
+    """Momento de aprendizado - DIDÁTICO."""
+    
+    lines = [
+        "📚 *MOMENTO DE APRENDIZADO*",
+        f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
+        "",
+        f"*TÓPICO:* {topic.upper()}",
+        "",
+        f"*💡 LIÇÃO:*",
+        lesson,
+        "",
+        f"*🎯 NA PRÁTICA:*",
+        action,
+        "",
+        "_Jarvis - Seu Analista_",
+    ]
     
     return "\n".join(lines)
 

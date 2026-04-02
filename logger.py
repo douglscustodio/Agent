@@ -1,98 +1,177 @@
 """
-logger.py — Production-grade structured JSON logging
-Mandatory: python-json-logger
-All output: single-line JSON to stdout (Railway-compatible)
+kill_switch.py — Emergency Kill Switch and Drawdown Protection
+
+Responsabilidades:
+1. Monitorar P&L diário
+2. Parar trading se perda diária > limite
+3. Contador de perdas consecutivas
+4. Auto-reset à meia-noite UTC
+5. Bloquear novas posições se em drawdown
+
+Uso:
+    kill_switch = KillSwitch()
+    
+    # Antes de entrar em trade
+    if not kill_switch.can_trade():
+        log.warning("KILL_SWITCH", "Trading blocked - kill switch active")
+        return
+    
+    # Depois de fechar trade
+    kill_switch.record_result(symbol, pnl)
+    
+    # Status
+    status = kill_switch.get_status()
 """
 
-import logging
-import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Dict, List, Optional
 
-from pythonjsonlogger import jsonlogger
+from logger import get_logger
 
+log = get_logger("kill_switch")
 
-class ProductionJsonFormatter(jsonlogger.JsonFormatter):
-    OPTIONAL_FIELDS = {
-        "symbol", "direction", "score", "ws_status",
-        "reconnect_attempt", "db_status", "alert_id", "latency_ms",
-    }
-
-    def add_fields(
-        self,
-        log_record: dict,
-        record: logging.LogRecord,
-        message_dict: dict,
-    ) -> None:
-        super().add_fields(log_record, record, message_dict)
-
-        ordered: dict = {}
-        ordered["timestamp"]  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        ordered["level"]      = record.levelname
-        ordered["module"]     = record.name
-        ordered["event_type"] = log_record.pop("event_type", "UNSPECIFIED")
-        ordered["detail"]     = log_record.pop("message", record.getMessage())
-
-        for field in self.OPTIONAL_FIELDS:
-            value = log_record.pop(field, None)
-            if value is not None:
-                ordered[field] = value
-
-        log_record.clear()
-        log_record.update(ordered)
-
-        for key in ("msg", "exc_info", "exc_text", "stack_info"):
-            log_record.pop(key, None)
-
-    def format(self, record: logging.LogRecord) -> str:
-        line = super().format(record)
-        return line.replace("\n", " ").replace("\r", "")
+MAX_DAILY_LOSS_PCT = 0.05
+MAX_CONSECUTIVE_LOSSES = 3
+MAX_DRAWDOWN_PCT = 0.10
+RESET_HOUR_UTC = 0
 
 
-def _build_stdout_handler() -> logging.StreamHandler:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        ProductionJsonFormatter(
-            fmt="%(timestamp)s %(level)s %(module)s %(event_type)s %(detail)s"
+@dataclass
+class TradeResult:
+    symbol: str
+    pnl_pct: float
+    timestamp: float
+    direction: str
+
+
+@dataclass
+class KillSwitchStatus:
+    is_active: bool
+    reason: str
+    daily_pnl_pct: float
+    consecutive_losses: int
+    last_reset: str
+    trades_today: int
+    block_new_trades: bool
+
+
+class KillSwitch:
+    def __init__(self):
+        self._daily_pnl: float = 0.0
+        self._consecutive_losses: int = 0
+        self._last_reset_date: str = self._today_str()
+        self._trades_today: int = 0
+        self._trade_history: List[TradeResult] = []
+        self._blocked_reason: str = ""
+        
+        self.max_daily_loss_pct = MAX_DAILY_LOSS_PCT
+        self.max_consecutive_losses = MAX_CONSECUTIVE_LOSSES
+        self.max_drawdown_pct = MAX_DRAWDOWN_PCT
+        
+        self._check_reset()
+        log.info("KILL_SWITCH", f"initialized - max daily loss: {self.max_daily_loss_pct*100}%")
+
+    def _today_str(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _check_reset(self) -> None:
+        today = self._today_str()
+        if today != self._last_reset_date:
+            self._daily_pnl = 0.0
+            self._consecutive_losses = 0
+            self._trades_today = 0
+            self._trade_history = []
+            self._last_reset_date = today
+            self._blocked_reason = ""
+            log.info("KILL_SWITCH", "Daily reset - trading allowed")
+
+    def can_trade(self) -> bool:
+        self._check_reset()
+        
+        if self._daily_pnl <= -self.max_daily_loss_pct:
+            self._blocked_reason = f"Daily loss limit reached ({self._daily_pnl*100:.2f}%)"
+            log.critical("KILL_SWITCH", self._blocked_reason)
+            return False
+        
+        if self._consecutive_losses >= self.max_consecutive_losses:
+            self._blocked_reason = f"Consecutive losses limit ({self._consecutive_losses})"
+            log.critical("KILL_SWITCH", self._blocked_reason)
+            return False
+        
+        return True
+
+    def record_result(self, symbol: str, pnl_pct: float, direction: str = "LONG") -> None:
+        self._check_reset()
+        
+        self._trades_today += 1
+        self._daily_pnl += pnl_pct
+        
+        trade = TradeResult(
+            symbol=symbol,
+            pnl_pct=pnl_pct,
+            timestamp=time.time(),
+            direction=direction,
         )
-    )
-    return handler
+        self._trade_history.append(trade)
+        
+        if pnl_pct < 0:
+            self._consecutive_losses += 1
+            log.warning("KILL_SWITCH", f"Loss recorded: {symbol} {pnl_pct*100:.2f}% - consecutive: {self._consecutive_losses}")
+        else:
+            self._consecutive_losses = 0
+            log.info("KILL_SWITCH", f"Win recorded: {symbol} {pnl_pct*100:.2f}%")
+        
+        self._check_kill_conditions()
 
+    def _check_kill_conditions(self) -> None:
+        if self._daily_pnl <= -self.max_daily_loss_pct:
+            log.critical("KILL_SWITCH", f"KILL SWITCH TRIGGERED - Daily loss: {self._daily_pnl*100:.2f}%")
 
-class StructuredLogger:
-    _handler: logging.StreamHandler = _build_stdout_handler()
+    def get_status(self) -> KillSwitchStatus:
+        self._check_reset()
+        
+        return KillSwitchStatus(
+            is_active=not self.can_trade(),
+            reason=self._blocked_reason,
+            daily_pnl_pct=self._daily_pnl,
+            consecutive_losses=self._consecutive_losses,
+            last_reset=self._last_reset_date,
+            trades_today=self._trades_today,
+            block_new_trades=not self.can_trade(),
+        )
 
-    def __init__(self, module_name: str) -> None:
-        self._logger = logging.getLogger(module_name)
-        if not self._logger.handlers:
-            self._logger.addHandler(self._handler)
-        self._logger.propagate = False
-        self._logger.setLevel(logging.DEBUG)
+    def force_reset(self) -> None:
+        self._daily_pnl = 0.0
+        self._consecutive_losses = 0
+        self._trades_today = 0
+        self._trade_history = []
+        self._blocked_reason = ""
+        self._last_reset_date = self._today_str()
+        log.warning("KILL_SWITCH", "FORCED RESET by admin")
 
-    def debug(self, event_type: str, detail: str, **kwargs: Any) -> None:
-        self._emit(logging.DEBUG, event_type, detail, **kwargs)
+    def get_position_size_factor(self) -> float:
+        factor = 1.0
+        
+        if self._consecutive_losses >= 2:
+            factor = 0.5
+            log.warning("KILL_SWITCH", f"Reducing size by 50% - {self._consecutive_losses} consecutive losses")
+        elif self._daily_pnl < -0.02:
+            factor = 0.75
+            log.warning("KILL_SWITCH", f"Reducing size by 25% - daily loss {self._daily_pnl*100:.1f}%")
+        
+        return factor
 
-    def info(self, event_type: str, detail: str, **kwargs: Any) -> None:
-        self._emit(logging.INFO, event_type, detail, **kwargs)
-
-    def warning(self, event_type: str, detail: str, **kwargs: Any) -> None:
-        self._emit(logging.WARNING, event_type, detail, **kwargs)
-
-    def error(self, event_type: str, detail: str, **kwargs: Any) -> None:
-        self._emit(logging.ERROR, event_type, detail, **kwargs)
-
-    def critical(self, event_type: str, detail: str, **kwargs: Any) -> None:
-        self._emit(logging.CRITICAL, event_type, detail, **kwargs)
-
-    def timed(self, event_type: str, detail: str, start: float, **kwargs: Any) -> None:
-        latency_ms = round((time.monotonic() - start) * 1000, 2)
-        self.info(event_type, detail, latency_ms=latency_ms, **kwargs)
-
-    def _emit(self, level: int, event_type: str, detail: str, **kwargs: Any) -> None:
-        extra = {"event_type": event_type, **kwargs}
-        self._logger.log(level, detail, extra=extra)
-
-
-def get_logger(module_name: str) -> StructuredLogger:
-    return StructuredLogger(module_name)
+    def get_confidence_adjustment(self) -> float:
+        confidence = 1.0
+        
+        if self._consecutive_losses == 1:
+            confidence = 0.9
+        elif self._consecutive_losses >= 2:
+            confidence = 0.7
+        
+        if self._daily_pnl < 0:
+            confidence *= 0.8
+        
+        return confidence

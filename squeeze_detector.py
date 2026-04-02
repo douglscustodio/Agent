@@ -1,144 +1,372 @@
 """
-squeeze_detector.py — Liquidation Squeeze and Crowded Trade Detector
+setup_wizard.py — Jarvis AI Setup Wizard
 
-Detecta setups perigosos onde:
-1. Funding extremamente alto (long squeeze esperado)
-2. Open Interest em spike (movimento iminente)
-3. Preço perto de máxima histórica (liquidação de longa)
-4. Correlação com posições populares
+Executar: python setup_wizard.py
 
-Isso evita entrar em trades que parecem bons mas são armadilhas.
+Guia interativo para configurar o Jarvis AI Trading Monitor.
 """
 
-from dataclasses import dataclass
-from typing import Dict, Optional
-
-from logger import get_logger
-
-log = get_logger("squeeze")
-
-FUNDING_DANGER_HIGH = 0.01
-FUNDING_WARNING = 0.003
-OI_SPIKE_THRESHOLD = 1.5
-PRICE_NEAR_ATH_THRESHOLD = 0.95
+import os
+import sys
 
 
-@dataclass
-class SqueezeResult:
-    is_squeeze: bool
-    is_crowded: bool
-    danger_level: str
-    reasons: list
-    recommendation: str
+def print_banner():
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║     🤖 JARVIS AI TRADING MONITOR - SETUP WIZARD            ║
+║                                                              ║
+║     Seu assistente pessoal de trading com IA                ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+    """)
 
 
-def detect_squeeze(
-    funding_rate: Optional[float],
-    oi_change_pct: Optional[float],
-    current_price: float,
-    ath_price: float,
-    position_direction: str,
-) -> SqueezeResult:
-    """
-    Analisa se o trade está em squeeze/crowded territory.
+def print_step(num, total, title):
+    print(f"\n{'='*60}")
+    print(f"  PASSO {num}/{total}: {title}")
+    print('='*60)
+
+
+def print_success(msg):
+    print(f"  ✅ {msg}")
+
+
+def print_warning(msg):
+    print(f"  ⚠️ {msg}")
+
+
+def print_error(msg):
+    print(f"  ❌ {msg}")
+
+
+def ask_question(question, default=None, required=True):
+    while True:
+        if default:
+            prompt = f"  {question} [{default}]: "
+        else:
+            prompt = f"  {question}: "
+        
+        answer = input(prompt).strip()
+        
+        if not answer and default:
+            return default
+        
+        if not answer and required:
+            print_error("Este campo é obrigatório!")
+            continue
+        
+        return answer
+
+
+def ask_yes_no(question, default="n"):
+    while True:
+        suffix = " [s/N]: " if default == "n" else " [S/n]: "
+        answer = input(f"  {question}{suffix}").strip().lower()
+        
+        if not answer:
+            return default == "s"
+        
+        if answer in ["s", "sim", "y", "yes"]:
+            return True
+        if answer in ["n", "nao", "não", "no"]:
+            return False
+        
+        print_error("Digite 's' para sim ou 'n' para não")
+
+
+def setup_env_file():
+    print_step(1, 5, "Configurar Arquivo .env")
     
-    Args:
-        funding_rate: Taxa de funding atual (ex: 0.001 = 0.1%)
-        oi_change_pct: Mudança % no Open Interest
-        current_price: Preço atual do ativo
-        ath_price: Máxima história do ativo
-        position_direction: "LONG" ou "SHORT"
+    env_vars = {}
     
-    Returns:
-        SqueezeResult com análise completa
-    """
-    reasons = []
-    danger_level = "LOW"
+    print("\n  Vamos configurar suas variáveis de ambiente.")
+    print("  Se você não tem alguma chave, pode deixar em branco.\n")
     
-    if funding_rate is None or oi_change_pct is None:
-        return SqueezeResult(
-            is_squeeze=False,
-            is_crowded=False,
-            danger_level="UNKNOWN",
-            reasons=["Dados de funding/OI não disponíveis"],
-            recommendation="CUIDADO - dados incompletos",
+    # Hyperliquid
+    print("\n  📊 HYPERLIQUID (Dados de Mercado)")
+    print("  ─────────────────────────────────────")
+    print("  Configure em: https://app.hyperliquid.xyz/")
+    print("  Vá em Settings > API Keys > Create Key")
+    
+    env_vars['HYPERLIQUID_ADDRESS'] = ask_question(
+        "Endereço da wallet (0x...)",
+        required=False
+    )
+    env_vars['HYPERLIQUID_PRIVATE_KEY'] = ask_question(
+        "Chave privada da API",
+        required=False
+    )
+    
+    # Telegram
+    print("\n  📱 TELEGRAM (Alertas)")
+    print("  ─────────────────────────────────────")
+    print("  1. Abra o Telegram e procure @BotFather")
+    print("  2. Envie /newbot e siga as instruções")
+    print("  3. Copie o token que receber")
+    print("  4. inicie uma conversa com seu bot e envie qualquer mensagem")
+    print("  5. Acesse: https://api.telegram.org/bot<SEU_TOKEN>/getUpdates")
+    print("  6. Copie o 'chat' > 'id'")
+    
+    env_vars['TELEGRAM_BOT_TOKEN'] = ask_question(
+        "Token do bot Telegram"
+    )
+    env_vars['TELEGRAM_CHAT_ID'] = ask_question(
+        "Seu Chat ID (número)"
+    )
+    
+    # Groq AI
+    print("\n  🤖 GROQ AI (Análise Inteligente) - Opcional")
+    print("  ─────────────────────────────────────")
+    print("  Configure em: https://console.groq.com/")
+    print("  Crie uma conta gratuita e gere uma API Key")
+    
+    env_vars['GROQ_API_KEY'] = ask_question(
+        "Chave da Groq API",
+        required=False
+    )
+    
+    # CryptoPanic
+    print("\n  📰 CRYPTOPANIC (Notícias) - Opcional")
+    print("  ─────────────────────────────────────")
+    print("  Configure em: https://cryptopanic.com/")
+    print("  Crie conta > Settings > API > Developer API")
+    
+    env_vars['CRYPTOPANIC_TOKEN'] = ask_question(
+        "Token do CryptoPanic",
+        required=False
+    )
+    
+    # Database
+    print("\n  🗄️ DATABASE (Histórico) - Opcional")
+    print("  ─────────────────────────────────────")
+    print("  Padrão: SQLite (automático)")
+    print("  Para PostgreSQL: postgresql://user:pass@host:5432/db")
+    
+    db_choice = ask_yes_no(
+        "Deseja usar PostgreSQL em vez de SQLite?",
+        default="n"
+    )
+    
+    if db_choice:
+        env_vars['DATABASE_URL'] = ask_question(
+            "URL do PostgreSQL"
         )
-    
-    if funding_rate >= FUNDING_DANGER_HIGH:
-        reasons.append(f"Funding EXTREMO: {funding_rate*100:.2f}% (armadilha de longa)")
-        danger_level = "HIGH"
-    elif funding_rate >= FUNDING_WARNING:
-        reasons.append(f"Funding ELEVADO: {funding_rate*100:.2f}%")
-        if danger_level != "HIGH":
-            danger_level = "MEDIUM"
-    
-    if oi_change_pct >= OI_SPIKE_THRESHOLD * 100:
-        reasons.append(f"OI em SPIKE: +{oi_change_pct:.0f}% (movimento iminente)")
-        if danger_level == "LOW":
-            danger_level = "MEDIUM"
-    
-    if current_price > 0 and ath_price > 0:
-        ath_ratio = current_price / ath_price
-        if ath_ratio >= PRICE_NEAR_ATH_THRESHOLD:
-            reasons.append(f"Preço perto da ATH: {ath_ratio:.1%} (risco de liquidação)")
-            if danger_level == "LOW":
-                danger_level = "MEDIUM"
-    
-    is_squeeze = danger_level in ("HIGH", "MEDIUM") and funding_rate > 0 and position_direction == "LONG"
-    is_crowded = len(reasons) >= 2
-    
-    if is_squeeze:
-        recommendation = "EVITAR LONG - funding alto = squeeze iminente"
-    elif is_crowded:
-        recommendation = "CUIDADO - múltiplos fatores de risco"
-    elif danger_level == "MEDIUM":
-        recommendation = "Entrada possível mas com stop apertado"
     else:
-        recommendation = "Setup limpo"
+        env_vars['DATABASE_URL'] = "sqlite:///jarvis.db"
     
-    log.info(
-        "SQUEEZE_DETECTOR",
-        f"funding={funding_rate*100:.3f}% oi={oi_change_pct:+.0f}% "
-        f"danger={danger_level} squeeze={is_squeeze} crowded={is_crowded}"
+    return env_vars
+
+
+def setup_optional_features():
+    print_step(2, 5, "Configurar Features Opcionais")
+    
+    features = {}
+    
+    features['ENABLE_NEWS'] = ask_yes_no(
+        "Ativar monitoramento de notícias?",
+        default="s"
     )
     
-    return SqueezeResult(
-        is_squeeze=is_squeeze,
-        is_crowded=is_crowded,
-        danger_level=danger_level,
-        reasons=reasons,
-        recommendation=recommendation,
+    features['ENABLE_MACRO'] = ask_yes_no(
+        "Ativar análise macroeconômica?",
+        default="s"
     )
+    
+    features['ENABLE_AI'] = ask_yes_no(
+        "Ativar análise com IA (Groq)?",
+        default="s"
+    )
+    
+    return features
 
 
-def score_adjustment_for_squeeze(squeeze: SqueezeResult, base_score: float) -> float:
-    """
-    Ajusta score do sinal baseado no squeeze.
+def setup_risk_parameters():
+    print_step(3, 5, "Configurar Parâmetros de Risco")
     
-    Returns:
-        Score ajustado (pode ser menor ou maior dependendo do setup)
-    """
-    if squeeze.is_squeeze:
-        return base_score * 0.5
+    print("\n  ⚠️ Estes parâmetros controlam a proteção do seu capital")
+    print("  ⚠️ Ajuste com cuidado baseado no seu perfil de risco\n")
     
-    if squeeze.is_crowded:
-        return base_score * 0.75
+    risk_params = {}
     
-    if squeeze.danger_level == "MEDIUM":
-        return base_score * 0.85
+    risk_params['MAX_DAILY_LOSS'] = ask_question(
+        "Perda diária máxima (%)",
+        default="5"
+    )
     
-    return base_score
+    risk_params['MAX_CONSECUTIVE_LOSSES'] = ask_question(
+        "Máximo de perdas consecutivas",
+        default="3"
+    )
+    
+    risk_params['MAX_SIMULTANEOUS_TRADES'] = ask_question(
+        "Máximo de trades simultâneos",
+        default="3"
+    )
+    
+    risk_params['MIN_SIGNAL_SCORE'] = ask_question(
+        "Score mínimo para sinal (0-100)",
+        default="45"
+    )
+    
+    return risk_params
 
 
-def annotate_squeeze_to_signal(signal_dict: dict, squeeze: SqueezeResult) -> dict:
-    """
-    Adiciona informações de squeeze a um sinal.
-    """
-    signal_dict["squeeze"] = {
-        "is_squeeze": squeeze.is_squeeze,
-        "is_crowded": squeeze.is_crowded,
-        "danger_level": squeeze.danger_level,
-        "reasons": squeeze.reasons,
-        "adjusted_score": score_adjustment_for_squeeze(squeeze, signal_dict.get("score", 0)),
-    }
-    return signal_dict
+def write_env_file(env_vars, features, risk_params):
+    print_step(4, 5, "Gerar Arquivo .env")
+    
+    content = """# ============================================================
+# JARVIS AI TRADING MONITOR - Configuração
+# ============================================================
+# Gerado automaticamente pelo setup_wizard.py
+# ============================================================
+
+# ─── HYPERLIQUID (Obrigatório) ───
+# Dados de mercado em tempo real
+HYPERLIQUID_ADDRESS={}
+HYPERLIQUID_PRIVATE_KEY={}
+
+# ─── TELEGRAM (Obrigatório) ───
+# Alertas via Telegram
+TELEGRAM_BOT_TOKEN={}
+TELEGRAM_CHAT_ID={}
+
+# ─── GROQ AI (Opcional) ───
+# Análise inteligente com IA
+GROQ_API_KEY={}
+
+# ─── CRYPTOPANIC (Opcional) ───
+# Feed de notícias
+CRYPTOPANIC_TOKEN={}
+
+# ─── DATABASE ───
+# Padrão: SQLite
+DATABASE_URL={}
+
+# ─── LOGS ───
+LOG_LEVEL=INFO
+
+# ─── SCANNER ───
+# Intervalo de candles (1m, 5m, 15m, 1h, 4h, 1d)
+SCAN_INTERVAL=15m
+# Símbolos para monitorar (separados por vírgula)
+SCAN_SYMBOLS=BTC,ETH,SOL,ARB,OP,AVAX,NEAR,APT,SUI,INJ,TIA,JTO,PYTH,WIF,BONK,PEPE,LDO,RNDR,FET,TAO,DOGE,LINK,UNI,AAVE
+
+# ─── FEATURES ───
+ENABLE_NEWS={}
+ENABLE_MACRO={}
+ENABLE_AI={}
+
+# ─── RISK PARAMETERS ───
+MAX_DAILY_LOSS={}
+MAX_CONSECUTIVE_LOSSES={}
+MAX_SIMULTANEOUS_TRADES={}
+MIN_SIGNAL_SCORE={}
+
+# ─── EXECUTION (Avançado) ───
+# Não altere a menos que saiba o que está fazendo
+EXECUTION_MODE=simulation
+""".format(
+        env_vars.get('HYPERLIQUID_ADDRESS', ''),
+        env_vars.get('HYPERLIQUID_PRIVATE_KEY', ''),
+        env_vars.get('TELEGRAM_BOT_TOKEN', ''),
+        env_vars.get('TELEGRAM_CHAT_ID', ''),
+        env_vars.get('GROQ_API_KEY', ''),
+        env_vars.get('CRYPTOPANIC_TOKEN', ''),
+        env_vars.get('DATABASE_URL', 'sqlite:///jarvis.db'),
+        'true' if features.get('ENABLE_NEWS') else 'false',
+        'true' if features.get('ENABLE_MACRO') else 'false',
+        'true' if features.get('ENABLE_AI') else 'false',
+        risk_params.get('MAX_DAILY_LOSS', '5'),
+        risk_params.get('MAX_CONSECUTIVE_LOSSES', '3'),
+        risk_params.get('MAX_SIMULTANEOUS_TRADES', '3'),
+        risk_params.get('MIN_SIGNAL_SCORE', '45'),
+    )
+    
+    with open('.env', 'w') as f:
+        f.write(content)
+    
+    print_success("Arquivo .env gerado com sucesso!")
+    print(f"  Local: {os.path.abspath('.env')}")
+
+
+def verify_setup():
+    print_step(5, 5, "Verificar Configuração")
+    
+    errors = []
+    warnings = []
+    
+    # Check required fields
+    if not os.getenv('TELEGRAM_BOT_TOKEN'):
+        errors.append("TELEGRAM_BOT_TOKEN não configurado")
+    if not os.getenv('TELEGRAM_CHAT_ID'):
+        errors.append("TELEGRAM_CHAT_ID não configurado")
+    
+    # Check optional fields
+    if not os.getenv('HYPERLIQUID_ADDRESS'):
+        warnings.append("Hyperliquid não configurado - dados de mercado limitados")
+    if not os.getenv('GROQ_API_KEY'):
+        warnings.append("Groq AI não configurado - análise de IA desabilitada")
+    
+    # Display results
+    print()
+    if errors:
+        print_error("ERROS ENCONTRADOS:")
+        for e in errors:
+            print(f"  - {e}")
+        print()
+    
+    if warnings:
+        print_warning("AVISOS:")
+        for w in warnings:
+            print(f"  - {w}")
+        print()
+    
+    if not errors:
+        print_success("Configuração básica completa!")
+        print("\n  Para iniciar o Jarvis, execute:")
+        print("  python main.py")
+    else:
+        print_error("Corrija os erros acima antes de iniciar.")
+    
+    print("\n  Para reconfigurar, execute novamente:")
+    print("  python setup_wizard.py")
+
+
+def main():
+    print_banner()
+    
+    print("""
+  Este assistente vai te ajudar a configurar o Jarvis AI.
+  
+  Você precisará de:
+  • Token do bot Telegram (obrigatório)
+  • Chat ID do Telegram (obrigatório)
+  • Chave da API Hyperliquid (recomendado)
+  • Chave da API Groq (opcional)
+    """)
+    
+    if not ask_yes_no("Deseja continuar com o setup?", default="s"):
+        print("\n  Setup cancelado.")
+        return
+    
+    # Run setup steps
+    env_vars = setup_env_file()
+    features = setup_optional_features()
+    risk_params = setup_risk_parameters()
+    write_env_file(env_vars, features, risk_params)
+    verify_setup()
+    
+    print("""
+  ╔══════════════════════════════════════════════════════════════╗
+  ║                                                              ║
+  ║     🎉 CONFIGURAÇÃO CONCLUÍDA!                             ║
+  ║                                                              ║
+  ║     Próximo passo: python main.py                          ║
+  ║                                                              ║
+  ╚══════════════════════════════════════════════════════════════╝
+    """)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,618 +1,423 @@
 """
-main.py — Final integrated entry point (Phase 1–4)
-Startup order:
-  1. DB pool + schema
-  2. Performance tracker
-  3. Adaptive engine (restore weights)
-  4. News engine
-  5. Notifier + dedup table
-  6. Health server
-  7. WebSocket client (background)
-  8. APScheduler (all loops)
-  9. Graceful shutdown on SIGINT/SIGTERM
+macro_intelligence.py — Inteligência macroeconômica
+Monitora: FED/juros, CPI/PIB/empregos, S&P500/Nasdaq, DXY, geopolítica, ETF BTC
+Fontes: Yahoo Finance (via yfinance), NewsAPI/RSS, FRED
+Produz: MacroSnapshot com score de risco 0-100 e explicação em português
 """
 
 import asyncio
-import os
-import signal
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import aiohttp
 
-from adaptive import AdaptiveEngine
-from analyst import get_analyst
-from chatbot import JarvisChatbot
-from macro_intelligence import MacroEngine
-from memory_engine import MemoryEngine
-from btc_regime import RegimeResult
-from config import config
-from database import init_db, close_db, write_system_event, flush_event_buffer
-from data_quality import get_current_quality
-from health_server import run_health_server, app_state
+from database import write_system_event
 from logger import get_logger
-from news_engine import NewsEngine, NewsArticle, NewsContext
-from notifier import Notifier
-from performance_tracker import PerformanceTracker
-from portfolio_risk import PortfolioRiskManager
-from ranking import RankingResult
-from kill_switch import KillSwitch
-from scanner import run_scan_cycle, get_symbols
-from scheduler import build_scheduler
-from sector_rotation import compute_sector_rotation
-from websocket_client import run_websocket_client, ws_state
+from data_quality import update_quality
 
-log = get_logger("main")
-
-_state_lock = asyncio.Lock()
+log = get_logger("macro_intelligence")
 
 # ---------------------------------------------------------------------------
-# Global shared state — all loops read/write this
+# Tradução de termos em inglês para PT-BR (eventos macro RSS)
 # ---------------------------------------------------------------------------
 
-class AppContext:
-    def __init__(self) -> None:
-        self.news_engine:          NewsEngine           = NewsEngine(
-            cryptopanic_token=os.getenv("CRYPTOPANIC_TOKEN")
-        )
-        self.notifier:             Optional[Notifier]   = None
-        self.tracker:              PerformanceTracker   = PerformanceTracker()
-        self.adaptive:             AdaptiveEngine       = AdaptiveEngine()
-        self.macro:                MacroEngine          = MacroEngine()
-        self.memory:               MemoryEngine         = MemoryEngine()
-        self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
-        self.kill_switch:           KillSwitch          = KillSwitch()
+_MACRO_TRANSLATE_MAP = {
+    "interest rate": "taxa de juros",
+    "federal reserve": "Federal Reserve (Fed)",
+    "inflation": "inflação",
+    "cpi": "CPI (inflação)",
+    "gdp": "PIB",
+    "nonfarm payroll": "folha de pagamentos EUA",
+    "unemployment": "desemprego",
+    "fomc": "reunião Fed (FOMC)",
+    "rate hike": "aumento de juros",
+    "rate cut": "corte de juros",
+    "bitcoin etf": "ETF de Bitcoin",
+    "crypto regulation": "regulação de crypto",
+    "sec": "SEC (regulador EUA)",
+    "war": "conflito geopolítico",
+    "sanctions": "sanções",
+    "recession": "recessão",
+}
 
-        # Live data caches (populated by WS + scan loops)
-        self.latest_articles:      List[NewsArticle]    = []
-        self.latest_ranking:       Optional[RankingResult] = None
-        self.btc_closes:           List[float]          = []
-        self.btc_highs:            List[float]          = []
-        self.btc_lows:             List[float]          = []
-        self.latest_regime:        Optional[RegimeResult]  = None
-        self.last_scan_ts:         Optional[str]        = None
-        self.last_news_ts:         Optional[str]        = None
-        self.last_regime_ts:       Optional[str]        = None
-
-
-ctx = AppContext()
-_chatbot: Optional[JarvisChatbot] = None
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _translate_event_title(title: str) -> str:
+    """Traduz termos-chave de títulos de eventos macro do inglês para PT-BR."""
+    import re
+    result = title
+    t_lower = title.lower()
+    for en, pt in _MACRO_TRANSLATE_MAP.items():
+        if en in t_lower:
+            pattern = re.compile(re.escape(en), re.IGNORECASE)
+            result = pattern.sub(pt, result, count=1)
+            break
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Scheduled job implementations
+# Config
 # ---------------------------------------------------------------------------
 
-async def job_btc_regime() -> None:
-    """Refresh BTC regime every 2 min from Hyperliquid candles."""
-    from btc_regime import compute_adx
-    from hyperliquid_client import fetch_all_candles
-    candle_map = await fetch_all_candles(["BTC"], interval="15m", count=100)
-    candles    = candle_map.get("BTC", [])
-    if len(candles) < 30:
-        log.debug("BTC_REGIME_UPDATED", "btc_regime: not enough BTC candles")
-        return
-    highs  = [c.high  for c in candles]
-    lows   = [c.low   for c in candles]
-    closes = [c.close for c in candles]
-    regime = compute_adx(highs, lows, closes)
-    
-    ctx.latest_regime  = regime
-    ctx.last_regime_ts = _now_iso()
-    ctx.btc_closes = closes[-20:]
-    ctx.btc_highs = highs[-20:]
-    ctx.btc_lows = lows[-20:]
-    
-    log.info(
-        "BTC_REGIME_UPDATED",
-        f"BTC regime: {regime.regime} ADX={regime.adx:.2f} dir={regime.trend_direction}",
-    )
+CACHE_TTL_S   = 1800    # 30 min cache
+REQUEST_TIMEOUT = 10
+
+# Yahoo Finance quote URLs (no API key needed)
+YF_QUOTE_URL  = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d"
+
+# Economic calendar RSS (investing.com public feed)
+ECON_CALENDAR_RSS = "https://www.investing.com/rss/news_301.rss"
+
+# Market symbols to track
+MARKET_SYMBOLS = {
+    "SP500":  "^GSPC",
+    "NASDAQ": "^IXIC",
+    "DXY":    "DX-Y.NYB",
+    "VIX":    "^VIX",
+    "GOLD":   "GC=F",
+    "BTC_ETF": "IBIT",    # BlackRock BTC ETF
+}
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MarketData:
+    symbol:      str
+    name:        str
+    price:       float
+    change_pct:  float      # 24h % change
+    trend:       str        # "UP" | "DOWN" | "FLAT"
 
 
-async def job_news_fetch() -> None:
-    """Refresh news + macro in parallel every 3 min."""
-    t0 = time.monotonic()
-    async def _fetch_news():
-        try:
-            return await asyncio.wait_for(ctx.news_engine.fetch_all(), timeout=8.0)
-        except asyncio.TimeoutError:
-            log.warning("NEWS_TIMEOUT", "news fetch timed out — using cache")
-            return ctx.latest_articles or []
-
-    articles, _ = await asyncio.gather(
-        _fetch_news(),
-        ctx.macro.refresh(),
-        return_exceptions=True,
-    )
-    if isinstance(articles, list):
-        ctx.latest_articles = articles
-    ctx.last_news_ts = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_news_ts
-    log.timed("NEWS_FETCH_COMPLETE", f"news+macro parallel: {len(ctx.latest_articles)} articles", t0)
+@dataclass
+class MacroEvent:
+    title:       str
+    impact:      str        # "HIGH" | "MEDIUM" | "LOW"
+    sentiment:   str        # "positive" | "negative" | "neutral"
+    source:      str
+    published_at: float
 
 
-async def job_scan_cycle() -> None:
-    """Full scan + ranking + notify every 5 min."""
-    t0 = time.monotonic()
+@dataclass
+class MacroSnapshot:
+    # Market data
+    sp500:       Optional[MarketData] = None
+    nasdaq:      Optional[MarketData] = None
+    dxy:         Optional[MarketData] = None
+    vix:         Optional[MarketData] = None
+    gold:        Optional[MarketData] = None
+    btc_etf:     Optional[MarketData] = None
 
-    current_ws_status = ws_state.get("status", "DISCONNECTED")
-    if current_ws_status != "CONNECTED":
-        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan cycle")
-        return
+    # Events
+    events:      List[MacroEvent] = field(default_factory=list)
 
-    quality = get_current_quality()
-    if quality.should_block_signals:
-        log.error("SCAN_SKIP", f"Data quality blocked: {quality.quality_label}")
-        return
+    # Risk assessment
+    risk_score:  float = 50.0     # 0=baixo risco, 100=alto risco
+    risk_label:  str   = "NEUTRO"
+    crypto_bias: str   = "NEUTRO" # "BULLISH" | "BEARISH" | "NEUTRO"
+    explanation: List[str] = field(default_factory=list)
 
-    if not ctx.kill_switch.can_trade():
-        status = ctx.kill_switch.get_status()
-        log.critical("KILL_SWITCH", f"Trading blocked: {status.reason}")
-        if _chatbot and _chatbot._alert_chat_id:
-            await _chatbot.send_alert(f"🛑 *KILL SWITCH ATIVO*\n\n{status.reason}\n\nTrades bloqueados até reset.")
-        return
+    # Meta
+    updated_at:  float = field(default_factory=time.time)
 
-    live_weights = ctx.adaptive.get_weights()
+    @property
+    def is_fresh(self) -> bool:
+        return (time.time() - self.updated_at) < CACHE_TTL_S
 
-    # Compute sector heat scores from latest news
-    # This feeds narrative momentum into per-symbol scores
-    sector_heat_map = ctx.news_engine.get_sector_heat_scores(
-        ctx.latest_articles
-    ) if ctx.latest_articles else {}
-    if sector_heat_map:
-        hot = {k: v for k, v in sector_heat_map.items() if v > 65}
-        cold = {k: v for k, v in sector_heat_map.items() if v < 35}
-        log.info(
-            "SCAN_SECTOR_HEAT",
-            f"sector heat: hot={list(hot.keys())} cold={list(cold.keys())}",
-        )
 
-    # Run full scan — weights + sector heat + vol confirm all injected inside
+# ---------------------------------------------------------------------------
+# Yahoo Finance fetcher
+# ---------------------------------------------------------------------------
+
+async def _fetch_yf(
+    session: aiohttp.ClientSession,
+    ticker:  str,
+    name:    str,
+) -> Optional[MarketData]:
+    url = YF_QUOTE_URL.format(symbol=ticker)
     try:
-        ranking = await asyncio.wait_for(
-            run_scan_cycle(
-                adaptive_weights=live_weights,
-                sector_heat_map=sector_heat_map,
-            ),
-            timeout=25.0,
-        )
-    except asyncio.TimeoutError:
-        log.error("SCAN_TIMEOUT", "scan cycle timed out after 25s — skipping")
-        return
-    ctx.latest_ranking       = ranking
-    ctx.last_scan_ts         = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_scan_ts
-
-    # Build news context map for top signals
-    news_map: Dict[str, Optional[NewsContext]] = {}
-    for sig in ranking.top:
-        news_map[sig.symbol] = ctx.news_engine.get_context_for_symbol(
-            sig.symbol, ctx.latest_articles
-        )
-
-    # Sector rotation (for logging/reporting only — heat already applied in scanner)
-    if ranking.top:
-        symbol_scores = {s.symbol: s.score for s in ranking.top}
-        symbol_news   = {s.symbol: (news_map.get(s.symbol) or _empty_news(s.symbol)).impact_score
-                         for s in ranking.top}
-        sector_result = compute_sector_rotation(symbol_scores, symbol_news)
-        log.info(
-            "SCAN_SECTOR_ROTATION",
-            f"sector rotation: hot={sector_result.hot_sectors} cold={sector_result.cold_sectors[:2]}",
-        )
-
-    # Get macro snapshot and memory insights
-    macro_snap = ctx.macro.get_snapshot()
-
-    # PORTFOLIO RISK: Filter signals through risk manager
-    approved_signals, rejected_signals = ctx.risk_manager.filter_signals(
-        ranking.top, macro_snap
-    )
-    
-    # Update ranking with approved signals only
-    if len(approved_signals) < len(ranking.top):
-        log.warning("SCAN_RISK", f"Risk manager blocked {len(ranking.top) - len(approved_signals)} signals")
-        ranking.top = approved_signals
-        ranking.total_valid = len(approved_signals)
-
-    if not ranking.top:
-        log.info("SCAN_COMPLETE", "No signals after risk filtering")
-        return
-
-    # Dispatch alerts
-    await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)
-
-    # PROATIVO: Enviar alertas via chatbot se tiver sinais
-    if ranking.top and _chatbot:
-        log.info("CHATBOT_ALERT", f"sending proactive alerts for {len(ranking.top)} signals")
-        for sig in ranking.top[:2]:
-            reason = ""
-            if "relative_strength" in sig.components:
-                reason = f"Força relativa: {sig.components['relative_strength']:.0f}"
-            try:
-                await _chatbot.alert_signal(
-                    symbol=sig.symbol,
-                    direction=sig.direction,
-                    score=sig.score,
-                    reason=reason,
-                )
-            except Exception as exc:
-                log.error("CHATBOT_ALERT", f"failed to send signal alert: {exc}")
-
-    # Register sent alerts for performance tracking
-    for sig in ranking.top:
-        price = _get_price(sig.symbol)
-        if price:
-            await ctx.tracker.register_alert(
-                alert_id=f"{sig.symbol}:{sig.direction}:{ctx.last_scan_ts}",
-                symbol=sig.symbol,
-                direction=sig.direction,
-                score=sig.score,
-                entry_price=price,
-                dominant_component=sig.result.dominant_component,   # UPGRADE: feedback loop
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json(content_type=None)
+            result = data["chart"]["result"][0]
+            meta   = result["meta"]
+            price  = float(meta.get("regularMarketPrice", 0))
+            prev   = float(meta.get("previousClose", price))
+            change = ((price - prev) / prev * 100) if prev > 0 else 0.0
+            trend  = "UP" if change > 0.3 else ("DOWN" if change < -0.3 else "FLAT")
+            return MarketData(
+                symbol=ticker, name=name,
+                price=price, change_pct=round(change, 2), trend=trend,
             )
-
-    log.timed("SCAN_COMPLETE", f"scan cycle done: {len(ranking.top)} signals", t0)
-
-
-async def job_performance_checks() -> None:
-    """Check alert outcomes every hour."""
-    await ctx.tracker.run_checks()
-
-
-async def job_macro_refresh() -> None:
-    """Refresh macro data every 30 min."""
-    await ctx.macro.refresh()
-    snap = ctx.macro.get_snapshot()
-    if snap:
-        high_neg = [e for e in snap.events if e.impact == 'HIGH' and e.sentiment == 'negative']
-        if high_neg and _chatbot:
-            await _chatbot.alert_macro_risk(
-                risk_score=snap.risk_score,
-                event=high_neg[0].title[:100],
-            )
-
-
-async def job_market_report() -> None:
-    """Send hourly market report to Telegram."""
-    await ctx.notifier.send_market_report()
-
-
-async def job_btc_spike() -> None:
-    """Check BTC for sudden moves every 5 min."""
-    await ctx.notifier.check_btc_spike()
-    if _chatbot and _chatbot._alert_chat_id and ctx.btc_closes and len(ctx.btc_closes) >= 2:
-        btc_price = _get_price("BTC")
-        if btc_price > 0:
-            prev_price = ctx.btc_closes[0]
-            change_pct = ((btc_price - prev_price) / prev_price) * 100
-            if abs(change_pct) >= 3:
-                direction = "SUBIU" if change_pct > 0 else "CAIU"
-                await _chatbot.alert_btc_spike(
-                    direction=direction,
-                    pct=change_pct,
-                    price=btc_price,
-                )
-
-
-async def job_daily_summary() -> None:
-    """Send daily summary at midnight UTC."""
-    await ctx.notifier.send_daily_summary(tracker=ctx.tracker)
-    if _chatbot:
-        _chatbot.reset_daily_alerts()
-        try:
-            stats = await ctx.tracker.get_recent_stats(days=1)
-            await _chatbot.alert_daily_summary(stats)
-        except Exception:
-            pass
-
-
-async def job_adaptive_tune() -> None:
-    """Re-tune scoring weights every 24 hours."""
-    await ctx.adaptive.adapt(ctx.tracker)
-
-
-async def job_analyst_pulse() -> None:
-    """Send analyst market pulse every 15 min."""
-    try:
-        analyst = get_analyst()
-        btc_price = _get_price("BTC") or 0
-        
-        if ctx.latest_regime:
-            context = analyst.analyze_market(
-                btc_price=btc_price,
-                btc_closes=ctx.btc_closes[-20:] if ctx.btc_closes else [],
-                regime_result=ctx.latest_regime,
-                macro_snap=ctx.macro.get_snapshot(),
-            )
-            
-            from analyst import format_market_pulse
-            msg = format_market_pulse(context)
-            
-            if _chatbot and _chatbot._alert_chat_id:
-                await _chatbot.send_alert(msg)
-                log.info("ANALYST", "market pulse sent")
     except Exception as exc:
-        log.error("ANALYST_ERROR", f"pulse failed: {exc}")
-
-
-async def job_analyst_briefing() -> None:
-    """Send analyst briefing every 4 hours."""
-    try:
-        analyst = get_analyst()
-        btc_price = _get_price("BTC") or 0
-        
-        if ctx.latest_regime:
-            context = analyst.analyze_market(
-                btc_price=btc_price,
-                btc_closes=ctx.btc_closes[-20:] if ctx.btc_closes else [],
-                regime_result=ctx.latest_regime,
-                macro_snap=ctx.macro.get_snapshot(),
-            )
-            
-            from analyst import format_daily_briefing
-            signals = ctx.latest_ranking.top if ctx.latest_ranking else None
-            msg = format_daily_briefing(context, signals)
-            
-            if _chatbot and _chatbot._alert_chat_id:
-                await _chatbot.send_alert(msg)
-                log.info("ANALYST", "briefing sent")
-    except Exception as exc:
-        log.error("ANALYST_ERROR", f"briefing failed: {exc}")
-
-
-async def job_flush_events() -> None:
-    """Flush buffered DB events every 15 seconds."""
-    await flush_event_buffer()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _patch_scoring_weights(weights: Dict[str, float]) -> None:
-    """Inject live weights into the scoring module's global WEIGHTS dict."""
-    try:
-        import scoring
-        for k, v in weights.items():
-            if k in scoring.WEIGHTS:
-                scoring.WEIGHTS[k] = v
-    except Exception as exc:
-        log.error("WEIGHT_UPDATE_FAIL", f"weight patch failed: {exc}")
-
-
-def _get_price(symbol: str) -> Optional[float]:
-    try:
-        from websocket_client import ws_price_cache
-        return ws_price_cache.get(symbol)
-    except Exception:
+        log.warning("PERFORMANCE_LOGGED", f"YF fetch failed {ticker}: {exc}")
         return None
 
 
-def _empty_news(symbol: str):
-    from news_engine import NewsContext
-    return NewsContext(
-        symbol=symbol,
-        articles=[],
-        aggregate_sentiment="neutral",
-        impact_score=0.0,
-        top_headline="No news",
-        freshness_minutes=999.0,
-    )
-
-
 # ---------------------------------------------------------------------------
-# Graceful shutdown
+# News event fetcher (RSS)
 # ---------------------------------------------------------------------------
 
-_shutdown_event = asyncio.Event()
+def _parse_macro_rss(xml_text: str) -> List[MacroEvent]:
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
 
+    HIGH_KEYWORDS   = {"fed", "fomc", "interest rate", "cpi", "inflation", "gdp", "nonfarm",
+                       "payroll", "recession", "sanctions", "war", "ban", "etf", "approval"}
+    NEGATIVE_WORDS  = {"crash", "recession", "ban", "sanction", "war", "inflation", "selloff",
+                       "fear", "panic", "default", "crisis"}
+    POSITIVE_WORDS  = {"approval", "etf", "bullish", "growth", "cut", "stimulus", "inflow",
+                       "record", "rally", "surge"}
 
-def _handle_signal(sig) -> None:
-    log.warning("SYSTEM_START", f"received {sig.name} — shutting down")
-    _shutdown_event.set()
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-async def main() -> None:
-    log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
-    ai_key = bool(os.getenv("GROQ_API_KEY"))
-    ai_status = "habilitada" if ai_key else "desabilitada — configure GROQ_API_KEY"
-    log.info("SYSTEM_START", f"IA Groq: {ai_status}")
-    app_state["started_at"] = _now_iso()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _handle_signal, sig)
-
-    # ── 1. Database ──────────────────────────────────────────────────────
+    events = []
     try:
-        await init_db()
-    except RuntimeError as exc:
-        log.critical("SYSTEM_START", f"DB startup failed: {exc}")
-        return
+        root    = ET.fromstring(xml_text)
+        channel = root.find("channel")
+        if channel is None:
+            return events
+        for item in channel.findall("item")[:20]:
+            title_el = item.find("title")
+            pub_el   = item.find("pubDate")
+            title    = title_el.text if title_el is not None else ""
+            t_lower  = title.lower()
 
-    # ── 2. Performance tracker ───────────────────────────────────────────
-    await ctx.tracker.startup()
-
-    # ── 3. Adaptive engine ───────────────────────────────────────────────
-    await ctx.adaptive.startup()
-    await ctx.memory.startup()
-    await ctx.macro.refresh()
-
-    # ── 4. News engine (warm cache) ──────────────────────────────────────
-    try:
-        ctx.latest_articles = await ctx.news_engine.fetch_all()
-        ctx.last_news_ts    = _now_iso()
-        log.info("SYSTEM_READY", f"news cache warm: {len(ctx.latest_articles)} articles")
-    except Exception as exc:
-        log.warning("NEWS_PRIMARY_FAIL", f"initial news fetch failed: {exc}")
-
-    # ── 5. Notifier ──────────────────────────────────────────────────────
-    tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not tg_token:
-        log.warning("SYSTEM_START", "TELEGRAM_BOT_TOKEN não configurada — alertas Telegram desabilitados")
-    if not tg_chat_id:
-        log.warning("SYSTEM_START", "TELEGRAM_CHAT_ID não configurada — alertas Telegram desabilitados")
-    log.info("SYSTEM_START", f"Telegram config — token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
-    ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
-    await ctx.notifier.startup()
-    ctx.notifier.set_news_engine(ctx.news_engine)
-    await ctx.notifier.send_system_alert(
-        "🟢 *Crypto Monitor online*\nAll subsystems initialised. Scanner active."
-    )
-    log.info("SYSTEM_READY", "startup Telegram alert dispatched")
-
-    # ── 6. Health server ─────────────────────────────────────────────────
-    await run_health_server()
-
-    # ── 7. WebSocket client ──────────────────────────────────────────────
-    ws_task = asyncio.create_task(run_websocket_client())
-
-    # ── 8. Scheduler ─────────────────────────────────────────────────────
-    sched = build_scheduler(
-        scan_fn=        job_scan_cycle,
-        news_fn=        job_news_fetch,
-        regime_fn=      job_btc_regime,
-        performance_fn= job_performance_checks,
-        adaptive_fn=    job_adaptive_tune,
-        market_report_fn= job_market_report,
-        macro_refresh_fn= job_macro_refresh,
-        btc_spike_fn=   job_btc_spike,
-        daily_summary_fn= job_daily_summary,
-        flush_fn=       job_flush_events,          # UPGRADE: batch DB writes
-    )
-    sched.start()
-    
-    # REMOVIDO: Jobs repetitivos - muito frequentes e repetitivos
-    # sched.add_interval_job(job_analyst_pulse, minutes=15, name="analyst_pulse", jitter=30)
-    # sched.add_interval_job(job_analyst_briefing, minutes=0, name="analyst_briefing", hours=4, jitter=300)
-
-    await write_system_event(
-        "SYSTEM_READY",
-        "all subsystems running — scheduler active",
-        level="INFO", module="main",
-    )
-    log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
-
-    # ── 9. Chatbot (Telegram) ───────────────────────────────────────────
-    global _chatbot
-    _chatbot = None
-    if tg_token and tg_chat_id:
-        _chatbot = JarvisChatbot(tg_token)
-        _chatbot.set_alert_chat_id(tg_chat_id)
-        _chatbot.set_system_refs(
-            scanner_module=run_scan_cycle,
-            news_engine=ctx.news_engine,
-            macro_engine=ctx.macro,
-            tracker=ctx.tracker,
-            risk_manager=ctx.risk_manager,
-            kill_switch=ctx.kill_switch,
-            last_ranking=ctx.latest_ranking,
-        )
-        log.info("CHATBOT_READY", f"chatbot init - token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
-        
-        await asyncio.sleep(2)
-        welcome = await _chatbot.handle_message("/start", tg_chat_id)
-        log.info("CHATBOT_WELCOME", f"sending welcome: {len(welcome)} chars")
-        sent = await _chatbot._send_message(tg_chat_id, welcome)
-        log.info("CHATBOT_INIT", f"welcome sent: {sent}")
-
-    # ── 10. Message handling loop ────────────────────────────────────────
-    async def chat_loop():
-        if not _chatbot:
-            log.warning("CHATBOT_LOOP", "no chatbot configured")
-            return
-        log.info("CHATBOT_LOOP", "chat loop started - waiting for messages")
-        poll_count = 0
-        while not _shutdown_event.is_set():
             try:
-                poll_count += 1
-                if poll_count % 10 == 0:
-                    log.debug("CHATBOT_POLL", f"still polling... count={poll_count}")
-                
-                result = await asyncio.wait_for(_chatbot.poll(), timeout=35)
-                
-                if result is None:
-                    continue
-                
-                text = result.get("text", "")
-                user_chat_id = result.get("chat_id", "")
-                non_text = result.get("non_text", False)
-                
-                if not user_chat_id:
-                    log.warning("CHATBOT_MSG", "no chat_id in result")
-                    continue
-                
-                log.info("CHATBOT_MSG", f"user={user_chat_id} text='{text[:30]}...' non_text={non_text}")
-                
-                if non_text:
-                    response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver comandos."
-                else:
-                    from scanner import run_scan_cycle as _scan
-                    ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
-                    _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
-                    response = await _chatbot.handle_message(text, user_chat_id)
-                
-                if response:
-                    sent = await _chatbot._send_message(user_chat_id, response)
-                    log.info("CHATBOT_RESPONSE", f"sent={sent} to {user_chat_id}")
-                    
-            except asyncio.TimeoutError:
-                log.debug("CHATBOT_POLL", "timeout - no messages, continuing")
+                ts = parsedate_to_datetime(pub_el.text).timestamp() if pub_el is not None else time.time()
+            except Exception:
+                ts = time.time()
+
+            words = set(t_lower.split())
+            impact = "HIGH" if words & HIGH_KEYWORDS else "LOW"
+            sentiment = (
+                "positive" if words & POSITIVE_WORDS
+                else "negative" if words & NEGATIVE_WORDS
+                else "neutral"
+            )
+            events.append(MacroEvent(
+                title=title, impact=impact,
+                sentiment=sentiment, source="macro_rss",
+                published_at=ts,
+            ))
+    except Exception as exc:
+        log.error("NEWS_PRIMARY_FAIL", f"macro RSS parse error: {exc}")
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Risk scorer
+# ---------------------------------------------------------------------------
+
+def _compute_risk(snap: MacroSnapshot) -> tuple:
+    """Returns (risk_score 0-100, risk_label, crypto_bias, explanations)."""
+    score        = 50.0
+    explanations = []
+    bullish_pts  = 0
+    bearish_pts  = 0
+
+    # VIX — fear index
+    if snap.vix:
+        if snap.vix.price > 30:
+            score += 20; bearish_pts += 2
+            explanations.append(f"⚠️ VIX alto ({snap.vix.price:.1f}) — medo no mercado")
+        elif snap.vix.price > 20:
+            score += 10; bearish_pts += 1
+            explanations.append(f"⚠️ VIX elevado ({snap.vix.price:.1f}) — cautela recomendada")
+        else:
+            score -= 10; bullish_pts += 1
+            explanations.append(f"✅ VIX baixo ({snap.vix.price:.1f}) — mercado calmo")
+
+    # DXY — dólar forte = ruim para crypto
+    if snap.dxy:
+        if snap.dxy.change_pct > 0.5:
+            score += 15; bearish_pts += 2
+            explanations.append(f"⚠️ Dólar subindo ({snap.dxy.change_pct:+.1f}%) — pressão em crypto")
+        elif snap.dxy.change_pct < -0.5:
+            score -= 15; bullish_pts += 2
+            explanations.append(f"✅ Dólar caindo ({snap.dxy.change_pct:+.1f}%) — favorável para crypto")
+        else:
+            explanations.append(f"➖ Dólar (DXY) estável ({snap.dxy.change_pct:+.1f}%)")
+
+    # S&P500 — correlação com crypto
+    if snap.sp500:
+        if snap.sp500.change_pct > 1.0:
+            score -= 10; bullish_pts += 1
+            explanations.append(f"✅ S&P500 subindo ({snap.sp500.change_pct:+.1f}%) — risco on")
+        elif snap.sp500.change_pct < -1.0:
+            score += 10; bearish_pts += 1
+            explanations.append(f"⚠️ S&P500 caindo ({snap.sp500.change_pct:+.1f}%) — risco off")
+        else:
+            explanations.append(f"➖ S&P500 estável ({snap.sp500.change_pct:+.1f}%)")
+
+    # BTC ETF flows
+    if snap.btc_etf:
+        if snap.btc_etf.change_pct > 1.0:
+            score -= 10; bullish_pts += 2
+            explanations.append(f"✅ ETF BTC (IBIT) subindo {snap.btc_etf.change_pct:+.1f}% — entrada institucional")
+        elif snap.btc_etf.change_pct < -1.0:
+            score += 10; bearish_pts += 1
+            explanations.append(f"⚠️ ETF BTC (IBIT) caindo {snap.btc_etf.change_pct:+.1f}%")
+
+    # High impact news events
+    high_neg = [e for e in snap.events if e.impact == "HIGH" and e.sentiment == "negative"]
+    high_pos = [e for e in snap.events if e.impact == "HIGH" and e.sentiment == "positive"]
+    if high_neg:
+        score += 15; bearish_pts += 2
+        explanations.append(f"🔴 Evento macro negativo: {_translate_event_title(high_neg[0].title)[:60]}")
+    if high_pos:
+        score -= 10; bullish_pts += 2
+        explanations.append(f"🟢 Evento macro positivo: {_translate_event_title(high_pos[0].title)[:60]}")
+
+    # Clamp
+    score = max(0, min(100, score))
+
+    # Risk label
+    if score >= 75:
+        label = "ALTO RISCO 🔴"
+    elif score >= 55:
+        label = "RISCO MODERADO 🟡"
+    else:
+        label = "BAIXO RISCO 🟢"
+
+    # Crypto bias
+    if bullish_pts > bearish_pts + 1:
+        bias = "BULLISH"
+    elif bearish_pts > bullish_pts + 1:
+        bias = "BEARISH"
+    else:
+        bias = "NEUTRO"
+
+    return round(score, 1), label, bias, explanations
+
+
+# ---------------------------------------------------------------------------
+# MacroEngine
+# ---------------------------------------------------------------------------
+
+class MacroEngine:
+    def __init__(self) -> None:
+        self._snapshot: Optional[MacroSnapshot] = None
+
+    def get_snapshot(self) -> Optional[MacroSnapshot]:
+        return self._snapshot
+
+    def get_risk_score(self) -> float:
+        return self._snapshot.risk_score if self._snapshot else 50.0
+
+    def get_crypto_bias(self) -> str:
+        return self._snapshot.crypto_bias if self._snapshot else "NEUTRO"
+
+    async def refresh(self) -> MacroSnapshot:
+        """Fetch all macro data and compute risk. Called every 30 min by scheduler."""
+        snap = MacroSnapshot()
+        t0   = time.monotonic()
+
+        async with aiohttp.ClientSession() as session:
+            # Fetch market data concurrently
+            tasks = {
+                "sp500":   _fetch_yf(session, MARKET_SYMBOLS["SP500"],   "S&P 500"),
+                "nasdaq":  _fetch_yf(session, MARKET_SYMBOLS["NASDAQ"],  "Nasdaq"),
+                "dxy":     _fetch_yf(session, MARKET_SYMBOLS["DXY"],     "Dólar (DXY)"),
+                "vix":     _fetch_yf(session, MARKET_SYMBOLS["VIX"],     "VIX (Medo)"),
+                "gold":    _fetch_yf(session, MARKET_SYMBOLS["GOLD"],    "Ouro"),
+                "btc_etf": _fetch_yf(session, MARKET_SYMBOLS["BTC_ETF"], "ETF BTC (IBIT)"),
+            }
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            success_count = 0
+            for key, result in zip(tasks.keys(), results):
+                if not isinstance(result, Exception) and result:
+                    setattr(snap, key, result)
+                    success_count += 1
+
+            update_quality(
+                macro_fetched_at=time.time(),
+                macro_api_available=(success_count > 0),
+            )
+
+            # Fetch macro news
+            try:
+                async with session.get(
+                    ECON_CALENDAR_RSS,
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as resp:
+                    if resp.status == 200:
+                        xml = await resp.text()
+                        snap.events = _parse_macro_rss(xml)
             except Exception as exc:
-                log.error("CHATBOT_ERROR", f"error: {exc}")
-                await asyncio.sleep(5)
+                log.warning("NEWS_PRIMARY_FAIL", f"macro RSS fetch failed: {exc}")
 
-    chat_task = asyncio.create_task(chat_loop()) if _chatbot else None
+        # Score risk
+        snap.risk_score, snap.risk_label, snap.crypto_bias, snap.explanation = _compute_risk(snap)
+        snap.updated_at = time.time()
+        self._snapshot  = snap
 
-    # ── 11. Run until signal ─────────────────────────────────────────────
-    await _shutdown_event.wait()
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
+        log.info(
+            "PERFORMANCE_LOGGED",
+            f"macro refresh: risk={snap.risk_score} bias={snap.crypto_bias} events={len(snap.events)}",
+            latency_ms=elapsed,
+        )
+        await write_system_event(
+            "PERFORMANCE_LOGGED",
+            f"macro snapshot: risk={snap.risk_score} bias={snap.crypto_bias}",
+            level="INFO", module="macro_intelligence",
+            score=snap.risk_score, latency_ms=elapsed,
+        )
+        return snap
 
-    # ── 10. Graceful teardown ────────────────────────────────────────────
-    log.info("SYSTEM_START", "initiating graceful shutdown")
+    def format_report(self) -> str:
+        """Format macro snapshot as Portuguese Telegram message."""
+        snap = self._snapshot
+        if not snap:
+            return "📊 *Dados macro ainda carregando...*"
 
-    await ctx.notifier.send_system_alert("🔴 *Crypto Monitor offline*\nShutting down.")
+        now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+        lines   = [
+            "🌍 *CONTEXTO MACROECONÔMICO*",
+            f"_{now_str}_",
+            "",
+            f"*Risco de mercado: {snap.risk_label}*",
+            f"*Viés para crypto: {'🟢 ALTISTA' if snap.crypto_bias == 'BULLISH' else ('🔴 BAIXISTA' if snap.crypto_bias == 'BEARISH' else '⚪ NEUTRO')}*",  # PT-BR
+            "",
+            "*📈 Mercados tradicionais:*",
+        ]
 
-  
+        for attr, label in [
+            ("sp500",   "S&P 500"),
+            ("nasdaq",  "Nasdaq"),
+            ("dxy",     "Dólar (DXY)"),
+            ("vix",     "VIX (Medo)"),
+            ("gold",    "Ouro"),
+            ("btc_etf", "ETF BTC (IBIT)"),
+        ]:
+            md: Optional[MarketData] = getattr(snap, attr, None)
+            if md:
+                arrow = "⬆️" if md.trend == "UP" else ("⬇️" if md.trend == "DOWN" else "➡️")
+                lines.append(f"• {label}: `{md.price:,.2f}` {arrow} ({md.change_pct:+.2f}%)")
 
-    ws_task.cancel()
-    try:
-        await ws_task
-    except asyncio.CancelledError:
-        pass
+        lines.append("")
+        lines.append("*🧠 O que isso significa para crypto:*")
+        for exp in snap.explanation[:5]:
+            lines.append(f"• {exp}")
 
-    if chat_task:
-        chat_task.cancel()
-        try:
-            await chat_task
-        except asyncio.CancelledError:
-            pass
+        if snap.events:
+            high_events = [e for e in snap.events if e.impact == "HIGH"][:3]
+            if high_events:
+                lines.append("")
+                lines.append("*📰 Eventos de alto impacto:*")
+                for e in high_events:
+                    emoji = "🔴" if e.sentiment == "negative" else ("🟢" if e.sentiment == "positive" else "⚪")
+                    title_pt = _translate_event_title(e.title)
+                    lines.append(f"• {emoji} {title_pt[:80]}")
 
-    await close_db()
-
-    await write_system_event(
-        "SYSTEM_START", "shutdown complete",
-        level="INFO", module="main",
-    )
-    log.info("SYSTEM_START", "=== shutdown complete ===")
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("_Jarvis AI Trading Monitor_")
+        return "\n".join(lines)

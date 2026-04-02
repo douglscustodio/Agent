@@ -404,8 +404,9 @@ async def run_scan_cycle(
         log.info("NO_TRADE", "No signals above threshold - market conditions not favorable")
         return ranking
 
+    # Allow WATCHLIST signals (score >= 35) alongside VALID/HIGH_CONVICTION
     avg_score = sum(s.total for s in ranking.top) / len(ranking.top) if ranking.top else 0
-    if avg_score < 45:
+    if avg_score < 35:
         log.warning("NO_TRADE", f"Average score {avg_score:.0f} below minimum - skipping signals")
         ranking.top = []
         ranking.total_valid = 0

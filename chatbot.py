@@ -51,7 +51,8 @@ class JarvisChatbot:
         self._system_refs: Dict[str, Any] = {}
         self._user_first_contact: Dict[str, bool] = {}
         self._alert_chat_id: Optional[str] = None
-        self._signal_alerted_today: set = set()
+        self._signal_alerted_today: Dict[str, float] = {}  # key -> timestamp
+        self._last_scores: Dict[str, float] = {}  # key -> score
         
         self._commands = {
             "/start": self._cmd_start,
@@ -117,10 +118,23 @@ class JarvisChatbot:
             log.warning("CHATBOT_ALERT", f"Cannot send signal alert - no chat_id set")
             return
         
+        import time
         key = f"{symbol}:{direction}"
+        
+        # Verificar cooldown de 1 hora
         if key in self._signal_alerted_today:
-            log.info("CHATBOT_ALERT", f"signal {key} already alerted today, skipping")
-            return
+            last_sent = self._signal_alerted_today[key]
+            elapsed = time.time() - last_sent
+            if elapsed < 3600:  # 1 hora
+                # Só permite se score melhorou muito (>15 pontos)
+                if self._last_scores.get(key, 0) >= score - 15:
+                    log.info("CHATBOT_ALERT", f"signal {key} in cooldown ({elapsed/60:.0f}min), skipping")
+                    return
+                else:
+                    log.info("CHATBOT_ALERT", f"signal {key} score improved {score - self._last_scores.get(key, 0):.0f}pts, allowing")
+        
+        self._signal_alerted_today[key] = time.time()
+        self._last_scores[key] = score
         
         emoji = "📈" if direction == "LONG" else "📉"
         msg = (
@@ -132,12 +146,12 @@ class JarvisChatbot:
             msg += f"\n{reason}\n"
         msg += "\nDigite /sinais para mais detalhes"
         
-        self._signal_alerted_today.add(key)
         log.info("CHATBOT_ALERT", f"Sending signal alert: {symbol} {direction} score={score}")
         await self.send_alert(msg)
 
     def reset_daily_alerts(self) -> None:
         self._signal_alerted_today.clear()
+        self._last_scores.clear()
 
     async def alert_btc_spike(self, direction: str, pct: float, price: float) -> None:
         emoji = "🚀" if direction == "UP" else "💥"

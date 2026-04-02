@@ -401,6 +401,26 @@ def compute_score(
         position_direction=direction,
     )
     
+    # Squeeze only penalizes, doesn't block
+    if squeeze.is_squeeze:
+        penalty = 15.0  # -15 points penalty
+        total = max(0.0, total - penalty)
+        log.warning(
+            "PERFORMANCE_LOGGED",
+            f"SQUEEZE PENALTY for {symbol}: -{penalty}pts → {total:.1f} [{squeeze.recommendation}]",
+            symbol=symbol, direction=direction, score=total,
+        )
+    elif squeeze.danger_level == "MEDIUM":
+        penalty = 8.0  # -8 points penalty
+        total = max(0.0, total - penalty)
+        log.warning(
+            "PERFORMANCE_LOGGED",
+            f"SQUEEZE WARNING for {symbol}: -{penalty}pts → {total:.1f}",
+            symbol=symbol, direction=direction, score=total,
+        )
+    
+    band = classify_score(total)
+    
     if squeeze.is_squeeze:
         band = ScoreBand.REJECT
         total = 0.0

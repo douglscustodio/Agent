@@ -121,13 +121,13 @@ class JarvisChatbot:
         import time
         key = f"{symbol}:{direction}"
         
-        # Verificar cooldown de 1 hora
+        # Verificar cooldown de 45 minutos
         if key in self._signal_alerted_today:
             last_sent = self._signal_alerted_today[key]
             elapsed = time.time() - last_sent
-            if elapsed < 3600:  # 1 hora
-                # Só permite se score melhorou muito (>15 pontos)
-                if self._last_scores.get(key, 0) >= score - 15:
+            if elapsed < 2700:  # 45 minutos
+                # Só permite se score melhorou muito (>10 pontos)
+                if self._last_scores.get(key, 0) >= score - 10:
                     log.info("CHATBOT_ALERT", f"signal {key} in cooldown ({elapsed/60:.0f}min), skipping")
                     return
                 else:

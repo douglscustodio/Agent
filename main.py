@@ -493,8 +493,9 @@ async def main() -> None:
     )
     sched.start()
     
-    sched.add_interval_job(job_analyst_pulse, minutes=15, name="analyst_pulse", jitter=30)
-    sched.add_interval_job(job_analyst_briefing, minutes=0, name="analyst_briefing", hours=4, jitter=300)
+    # REMOVIDO: Jobs repetitivos - muito frequentes e repetitivos
+    # sched.add_interval_job(job_analyst_pulse, minutes=15, name="analyst_pulse", jitter=30)
+    # sched.add_interval_job(job_analyst_briefing, minutes=0, name="analyst_briefing", hours=4, jitter=300)
 
     await write_system_event(
         "SYSTEM_READY",

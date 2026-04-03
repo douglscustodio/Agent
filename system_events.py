@@ -1,186 +1,187 @@
-"""
-system_events.py — Dual-write system events to stdout (JSON) + DB table
-Every system event is logged to BOTH channels as required by the spec.
-"""
-
-import time
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Optional
-
-from logger import get_logger
-
-log = get_logger("system_events")
-
-
-# ---------------------------------------------------------------------------
-# Event dataclass
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SystemEvent:
-    event_type: str
-    detail: str
-    level: str = "INFO"
-    module: str = "system_events"
-    # Optional schema fields
-    symbol: Optional[str] = None
-    direction: Optional[str] = None
-    score: Optional[float] = None
-    ws_status: Optional[str] = None
-    reconnect_attempt: Optional[int] = None
-    db_status: Optional[str] = None
-    alert_id: Optional[str] = None
-    latency_ms: Optional[float] = None
-    # Auto-set at emit time
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-
-    def optional_kwargs(self) -> dict:
-        """Return only the non-None optional fields as a plain dict."""
-        optional_keys = {
-            "symbol", "direction", "score", "ws_status",
-            "reconnect_attempt", "db_status", "alert_id", "latency_ms",
-        }
-        return {k: v for k, v in asdict(self).items() if k in optional_keys and v is not None}
-
-
-# ---------------------------------------------------------------------------
-# Dual-write emitter
-# ---------------------------------------------------------------------------
-
-class SystemEventWriter:
-    """
-    Writes every system event to:
-      1. stdout (JSON via StructuredLogger)
-      2. database table `system_events`
-
-    Pass a live DB connection/pool at construction, or call set_db() later.
-    The writer degrades gracefully: if the DB is unavailable the stdout log
-    still emits and the DB error itself is logged.
-    """
-
-    _LEVEL_MAP = {
-        "DEBUG":    log.debug,
-        "INFO":     log.info,
-        "WARNING":  log.warning,
-        "ERROR":    log.error,
-        "CRITICAL": log.critical,
-    }
-
-    def __init__(self, db_conn=None) -> None:
-        self._db = db_conn
-
-    def set_db(self, db_conn) -> None:
-        self._db = db_conn
-
-    # ------------------------------------------------------------------
-    # Public emit
-    # ------------------------------------------------------------------
-
-    def emit(self, event: SystemEvent) -> None:
-        """Dual-write: stdout JSON + DB row."""
-        self._write_stdout(event)
-        self._write_db(event)
-
-    # Convenience factory methods -------------------------------------------
-
-    def ws_connected(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("WS_CONNECTED", detail, level="INFO", **kw))
-
-    def ws_disconnected(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("WS_DISCONNECTED", detail, level="ERROR", **kw))
-
-    def ws_reconnecting(self, detail: str, attempt: int, **kw) -> None:
-        self.emit(SystemEvent("WS_RECONNECTING", detail, level="WARNING",
-                              reconnect_attempt=attempt, **kw))
-
-    def ws_reconnected(self, detail: str, attempt: int, **kw) -> None:
-        self.emit(SystemEvent("WS_RECONNECTED", detail, level="INFO",
-                              reconnect_attempt=attempt, **kw))
-
-    def ws_dead_stream(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("WS_DEAD_STREAM", detail, level="WARNING", **kw))
-
-    def db_connect_fail(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("DB_CONNECT_FAIL", detail, level="ERROR",
-                              db_status="DOWN", **kw))
-
-    def db_recovered(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("DB_RECOVERED", detail, level="INFO",
-                              db_status="UP", **kw))
-
-    def alert_sent(self, detail: str, alert_id: str, **kw) -> None:
-        self.emit(SystemEvent("ALERT_SENT", detail, level="INFO",
-                              alert_id=alert_id, **kw))
-
-    def alert_suppressed(self, detail: str, alert_id: str, **kw) -> None:
-        self.emit(SystemEvent("ALERT_SUPPRESSED", detail, level="INFO",
-                              alert_id=alert_id, **kw))
-
-    def news_primary_fail(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("NEWS_PRIMARY_FAIL", detail, level="WARNING", **kw))
-
-    def news_fallback_used(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("NEWS_FALLBACK_USED", detail, level="WARNING", **kw))
-
-    def health_check_fail(self, detail: str, **kw) -> None:
-        self.emit(SystemEvent("HEALTH_CHECK_FAIL", detail, level="ERROR", **kw))
-
-    def performance_logged(self, detail: str, latency_ms: float, **kw) -> None:
-        self.emit(SystemEvent("PERFORMANCE_LOGGED", detail, level="INFO",
-                              latency_ms=latency_ms, **kw))
-
-    def system_start(self, detail: str = "service starting", **kw) -> None:
-        self.emit(SystemEvent("SYSTEM_START", detail, level="INFO", **kw))
-
-    def system_ready(self, detail: str = "service ready", **kw) -> None:
-        self.emit(SystemEvent("SYSTEM_READY", detail, level="INFO", **kw))
-
-    # ------------------------------------------------------------------
-    # Private writers
-    # ------------------------------------------------------------------
-
-    def _write_stdout(self, event: SystemEvent) -> None:
-        emit_fn = self._LEVEL_MAP.get(event.level, log.info)
-        emit_fn(event.event_type, event.detail, **event.optional_kwargs())
-
-    def _write_db(self, event: SystemEvent) -> None:
-        if self._db is None:
-            return
-        sql = """
-            INSERT INTO system_events
-                (timestamp, level, module, event_type, detail,
-                 symbol, direction, score, ws_status, reconnect_attempt,
-                 db_status, alert_id, latency_ms)
-            VALUES
-                (%s, %s, %s, %s, %s,
-                 %s, %s, %s, %s, %s,
-                 %s, %s, %s)
-        """
-        values = (
-            event.timestamp,
-            event.level,
-            event.module,
-            event.event_type,
-            event.detail,
-            event.symbol,
-            event.direction,
-            event.score,
-            event.ws_status,
-            event.reconnect_attempt,
-            event.db_status,
-            event.alert_id,
-            event.latency_ms,
-        )
-        try:
-            with self._db.cursor() as cur:
-                cur.execute(sql, values)
-            self._db.commit()
-        except Exception as exc:
-            # Log DB write failure to stdout only (avoid infinite loop)
-            log.error(
-                "DB_WRITE_FAIL",
-                f"failed to persist system event: {exc}",
-                event_type=event.event_type,
-                db_status="DOWN",
-            )
+[IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]s[IDEA].[IDEA]p[IDEA]y[IDEA] [IDEA]-[IDEA]-[IDEA] [IDEA]D[IDEA]u[IDEA]a[IDEA]l[IDEA]-[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]s[IDEA] [IDEA]t[IDEA]o[IDEA] [IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA] [IDEA]([IDEA]J[IDEA]S[IDEA]O[IDEA]N[IDEA])[IDEA] [IDEA]+[IDEA] [IDEA]D[IDEA]B[IDEA] [IDEA]t[IDEA]a[IDEA]b[IDEA]l[IDEA]e[IDEA]
+[IDEA]E[IDEA]v[IDEA]e[IDEA]r[IDEA]y[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA] [IDEA]i[IDEA]s[IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]d[IDEA] [IDEA]t[IDEA]o[IDEA] [IDEA]B[IDEA]O[IDEA]T[IDEA]H[IDEA] [IDEA]c[IDEA]h[IDEA]a[IDEA]n[IDEA]n[IDEA]e[IDEA]l[IDEA]s[IDEA] [IDEA]a[IDEA]s[IDEA] [IDEA]r[IDEA]e[IDEA]q[IDEA]u[IDEA]i[IDEA]r[IDEA]e[IDEA]d[IDEA] [IDEA]b[IDEA]y[IDEA] [IDEA]t[IDEA]h[IDEA]e[IDEA] [IDEA]s[IDEA]p[IDEA]e[IDEA]c[IDEA].[IDEA]
+[IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA]
+[IDEA]i[IDEA]m[IDEA]p[IDEA]o[IDEA]r[IDEA]t[IDEA] [IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]
+[IDEA]f[IDEA]r[IDEA]o[IDEA]m[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]a[IDEA]c[IDEA]l[IDEA]a[IDEA]s[IDEA]s[IDEA]e[IDEA]s[IDEA] [IDEA]i[IDEA]m[IDEA]p[IDEA]o[IDEA]r[IDEA]t[IDEA] [IDEA]a[IDEA]s[IDEA]d[IDEA]i[IDEA]c[IDEA]t[IDEA],[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]a[IDEA]c[IDEA]l[IDEA]a[IDEA]s[IDEA]s[IDEA],[IDEA] [IDEA]f[IDEA]i[IDEA]e[IDEA]l[IDEA]d[IDEA]
+[IDEA]f[IDEA]r[IDEA]o[IDEA]m[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]e[IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA] [IDEA]i[IDEA]m[IDEA]p[IDEA]o[IDEA]r[IDEA]t[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]e[IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA],[IDEA] [IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]z[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA]f[IDEA]r[IDEA]o[IDEA]m[IDEA] [IDEA]t[IDEA]y[IDEA]p[IDEA]i[IDEA]n[IDEA]g[IDEA] [IDEA]i[IDEA]m[IDEA]p[IDEA]o[IDEA]r[IDEA]t[IDEA] [IDEA]A[IDEA]n[IDEA]y[IDEA],[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA]
+[IDEA]
+[IDEA]f[IDEA]r[IDEA]o[IDEA]m[IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]r[IDEA] [IDEA]i[IDEA]m[IDEA]p[IDEA]o[IDEA]r[IDEA]t[IDEA] [IDEA]g[IDEA]e[IDEA]t[IDEA]_[IDEA]l[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]r[IDEA]
+[IDEA]
+[IDEA]l[IDEA]o[IDEA]g[IDEA] [IDEA]=[IDEA] [IDEA]g[IDEA]e[IDEA]t[IDEA]_[IDEA]l[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]r[IDEA]([IDEA]"[IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]s[IDEA]"[IDEA])[IDEA]
+[IDEA]
+[IDEA]
+[IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]#[IDEA] [IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]a[IDEA]c[IDEA]l[IDEA]a[IDEA]s[IDEA]s[IDEA]
+[IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]
+[IDEA]@[IDEA]d[IDEA]a[IDEA]t[IDEA]a[IDEA]c[IDEA]l[IDEA]a[IDEA]s[IDEA]s[IDEA]
+[IDEA]c[IDEA]l[IDEA]a[IDEA]s[IDEA]s[IDEA] [IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]_[IDEA]t[IDEA]y[IDEA]p[IDEA]e[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA] [IDEA]=[IDEA] [IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]m[IDEA]o[IDEA]d[IDEA]u[IDEA]l[IDEA]e[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA] [IDEA]=[IDEA] [IDEA]"[IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]s[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA] [IDEA]s[IDEA]c[IDEA]h[IDEA]e[IDEA]m[IDEA]a[IDEA] [IDEA]f[IDEA]i[IDEA]e[IDEA]l[IDEA]d[IDEA]s[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]y[IDEA]m[IDEA]b[IDEA]o[IDEA]l[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]s[IDEA]t[IDEA]r[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]i[IDEA]r[IDEA]e[IDEA]c[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]s[IDEA]t[IDEA]r[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]c[IDEA]o[IDEA]r[IDEA]e[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]f[IDEA]l[IDEA]o[IDEA]a[IDEA]t[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]s[IDEA]t[IDEA]r[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]i[IDEA]n[IDEA]t[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]s[IDEA]t[IDEA]r[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]s[IDEA]t[IDEA]r[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA]:[IDEA] [IDEA]O[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA][[IDEA]f[IDEA]l[IDEA]o[IDEA]a[IDEA]t[IDEA]][IDEA] [IDEA]=[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]A[IDEA]u[IDEA]t[IDEA]o[IDEA]-[IDEA]s[IDEA]e[IDEA]t[IDEA] [IDEA]a[IDEA]t[IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA] [IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]s[IDEA]t[IDEA]a[IDEA]m[IDEA]p[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA] [IDEA]=[IDEA] [IDEA]f[IDEA]i[IDEA]e[IDEA]l[IDEA]d[IDEA]([IDEA]d[IDEA]e[IDEA]f[IDEA]a[IDEA]u[IDEA]l[IDEA]t[IDEA]_[IDEA]f[IDEA]a[IDEA]c[IDEA]t[IDEA]o[IDEA]r[IDEA]y[IDEA]=[IDEA]l[IDEA]a[IDEA]m[IDEA]b[IDEA]d[IDEA]a[IDEA]:[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]e[IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA].[IDEA]n[IDEA]o[IDEA]w[IDEA]([IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]z[IDEA]o[IDEA]n[IDEA]e[IDEA].[IDEA]u[IDEA]t[IDEA]c[IDEA])[IDEA].[IDEA]s[IDEA]t[IDEA]r[IDEA]f[IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]([IDEA]"[IDEA]%[IDEA]Y[IDEA]-[IDEA]%[IDEA]m[IDEA]-[IDEA]%[IDEA]d[IDEA]T[IDEA]%[IDEA]H[IDEA]:[IDEA]%[IDEA]M[IDEA]:[IDEA]%[IDEA]S[IDEA]Z[IDEA]"[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]o[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA]_[IDEA]k[IDEA]w[IDEA]a[IDEA]r[IDEA]g[IDEA]s[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]d[IDEA]i[IDEA]c[IDEA]t[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]"[IDEA]"[IDEA]R[IDEA]e[IDEA]t[IDEA]u[IDEA]r[IDEA]n[IDEA] [IDEA]o[IDEA]n[IDEA]l[IDEA]y[IDEA] [IDEA]t[IDEA]h[IDEA]e[IDEA] [IDEA]n[IDEA]o[IDEA]n[IDEA]-[IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA] [IDEA]o[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA] [IDEA]f[IDEA]i[IDEA]e[IDEA]l[IDEA]d[IDEA]s[IDEA] [IDEA]a[IDEA]s[IDEA] [IDEA]a[IDEA] [IDEA]p[IDEA]l[IDEA]a[IDEA]i[IDEA]n[IDEA] [IDEA]d[IDEA]i[IDEA]c[IDEA]t[IDEA].[IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]o[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA]_[IDEA]k[IDEA]e[IDEA]y[IDEA]s[IDEA] [IDEA]=[IDEA] [IDEA]{[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]s[IDEA]y[IDEA]m[IDEA]b[IDEA]o[IDEA]l[IDEA]"[IDEA],[IDEA] [IDEA]"[IDEA]d[IDEA]i[IDEA]r[IDEA]e[IDEA]c[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]"[IDEA],[IDEA] [IDEA]"[IDEA]s[IDEA]c[IDEA]o[IDEA]r[IDEA]e[IDEA]"[IDEA],[IDEA] [IDEA]"[IDEA]w[IDEA]s[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA]"[IDEA],[IDEA] [IDEA]"[IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]"[IDEA],[IDEA] [IDEA]"[IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA]"[IDEA],[IDEA] [IDEA]"[IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]}[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]r[IDEA]e[IDEA]t[IDEA]u[IDEA]r[IDEA]n[IDEA] [IDEA]{[IDEA]k[IDEA]:[IDEA] [IDEA]v[IDEA] [IDEA]f[IDEA]o[IDEA]r[IDEA] [IDEA]k[IDEA],[IDEA] [IDEA]v[IDEA] [IDEA]i[IDEA]n[IDEA] [IDEA]a[IDEA]s[IDEA]d[IDEA]i[IDEA]c[IDEA]t[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA])[IDEA].[IDEA]i[IDEA]t[IDEA]e[IDEA]m[IDEA]s[IDEA]([IDEA])[IDEA] [IDEA]i[IDEA]f[IDEA] [IDEA]k[IDEA] [IDEA]i[IDEA]n[IDEA] [IDEA]o[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA]_[IDEA]k[IDEA]e[IDEA]y[IDEA]s[IDEA] [IDEA]a[IDEA]n[IDEA]d[IDEA] [IDEA]v[IDEA] [IDEA]i[IDEA]s[IDEA] [IDEA]n[IDEA]o[IDEA]t[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]}[IDEA]
+[IDEA]
+[IDEA]
+[IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]#[IDEA] [IDEA]D[IDEA]u[IDEA]a[IDEA]l[IDEA]-[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]t[IDEA]e[IDEA]r[IDEA]
+[IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]
+[IDEA]c[IDEA]l[IDEA]a[IDEA]s[IDEA]s[IDEA] [IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]W[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]r[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]W[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]s[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]r[IDEA]y[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA] [IDEA]t[IDEA]o[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]1[IDEA].[IDEA] [IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA] [IDEA]([IDEA]J[IDEA]S[IDEA]O[IDEA]N[IDEA] [IDEA]v[IDEA]i[IDEA]a[IDEA] [IDEA]S[IDEA]t[IDEA]r[IDEA]u[IDEA]c[IDEA]t[IDEA]u[IDEA]r[IDEA]e[IDEA]d[IDEA]L[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]r[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]2[IDEA].[IDEA] [IDEA]d[IDEA]a[IDEA]t[IDEA]a[IDEA]b[IDEA]a[IDEA]s[IDEA]e[IDEA] [IDEA]t[IDEA]a[IDEA]b[IDEA]l[IDEA]e[IDEA] [IDEA]`[IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]s[IDEA]`[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]P[IDEA]a[IDEA]s[IDEA]s[IDEA] [IDEA]a[IDEA] [IDEA]l[IDEA]i[IDEA]v[IDEA]e[IDEA] [IDEA]D[IDEA]B[IDEA] [IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]/[IDEA]p[IDEA]o[IDEA]o[IDEA]l[IDEA] [IDEA]a[IDEA]t[IDEA] [IDEA]c[IDEA]o[IDEA]n[IDEA]s[IDEA]t[IDEA]r[IDEA]u[IDEA]c[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA],[IDEA] [IDEA]o[IDEA]r[IDEA] [IDEA]c[IDEA]a[IDEA]l[IDEA]l[IDEA] [IDEA]s[IDEA]e[IDEA]t[IDEA]_[IDEA]d[IDEA]b[IDEA]([IDEA])[IDEA] [IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]r[IDEA].[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]T[IDEA]h[IDEA]e[IDEA] [IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]r[IDEA] [IDEA]d[IDEA]e[IDEA]g[IDEA]r[IDEA]a[IDEA]d[IDEA]e[IDEA]s[IDEA] [IDEA]g[IDEA]r[IDEA]a[IDEA]c[IDEA]e[IDEA]f[IDEA]u[IDEA]l[IDEA]l[IDEA]y[IDEA]:[IDEA] [IDEA]i[IDEA]f[IDEA] [IDEA]t[IDEA]h[IDEA]e[IDEA] [IDEA]D[IDEA]B[IDEA] [IDEA]i[IDEA]s[IDEA] [IDEA]u[IDEA]n[IDEA]a[IDEA]v[IDEA]a[IDEA]i[IDEA]l[IDEA]a[IDEA]b[IDEA]l[IDEA]e[IDEA] [IDEA]t[IDEA]h[IDEA]e[IDEA] [IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]t[IDEA]i[IDEA]l[IDEA]l[IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]s[IDEA] [IDEA]a[IDEA]n[IDEA]d[IDEA] [IDEA]t[IDEA]h[IDEA]e[IDEA] [IDEA]D[IDEA]B[IDEA] [IDEA]e[IDEA]r[IDEA]r[IDEA]o[IDEA]r[IDEA] [IDEA]i[IDEA]t[IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA] [IDEA]i[IDEA]s[IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]d[IDEA].[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]_[IDEA]L[IDEA]E[IDEA]V[IDEA]E[IDEA]L[IDEA]_[IDEA]M[IDEA]A[IDEA]P[IDEA] [IDEA]=[IDEA] [IDEA]{[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]D[IDEA]E[IDEA]B[IDEA]U[IDEA]G[IDEA]"[IDEA]:[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]d[IDEA]e[IDEA]b[IDEA]u[IDEA]g[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA]:[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]i[IDEA]n[IDEA]f[IDEA]o[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]W[IDEA]A[IDEA]R[IDEA]N[IDEA]I[IDEA]N[IDEA]G[IDEA]"[IDEA]:[IDEA] [IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]w[IDEA]a[IDEA]r[IDEA]n[IDEA]i[IDEA]n[IDEA]g[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]E[IDEA]R[IDEA]R[IDEA]O[IDEA]R[IDEA]"[IDEA]:[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]e[IDEA]r[IDEA]r[IDEA]o[IDEA]r[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]C[IDEA]R[IDEA]I[IDEA]T[IDEA]I[IDEA]C[IDEA]A[IDEA]L[IDEA]"[IDEA]:[IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]c[IDEA]r[IDEA]i[IDEA]t[IDEA]i[IDEA]c[IDEA]a[IDEA]l[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]}[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]_[IDEA]_[IDEA]i[IDEA]n[IDEA]i[IDEA]t[IDEA]_[IDEA]_[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]=[IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]d[IDEA]b[IDEA] [IDEA]=[IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]s[IDEA]e[IDEA]t[IDEA]_[IDEA]d[IDEA]b[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]d[IDEA]b[IDEA] [IDEA]=[IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]P[IDEA]u[IDEA]b[IDEA]l[IDEA]i[IDEA]c[IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]:[IDEA] [IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]"[IDEA]"[IDEA]D[IDEA]u[IDEA]a[IDEA]l[IDEA]-[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA] [IDEA]J[IDEA]S[IDEA]O[IDEA]N[IDEA] [IDEA]+[IDEA] [IDEA]D[IDEA]B[IDEA] [IDEA]r[IDEA]o[IDEA]w[IDEA].[IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]_[IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA]([IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]_[IDEA]d[IDEA]b[IDEA]([IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]C[IDEA]o[IDEA]n[IDEA]v[IDEA]e[IDEA]n[IDEA]i[IDEA]e[IDEA]n[IDEA]c[IDEA]e[IDEA] [IDEA]f[IDEA]a[IDEA]c[IDEA]t[IDEA]o[IDEA]r[IDEA]y[IDEA] [IDEA]m[IDEA]e[IDEA]t[IDEA]h[IDEA]o[IDEA]d[IDEA]s[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]W[IDEA]S[IDEA]_[IDEA]C[IDEA]O[IDEA]N[IDEA]N[IDEA]E[IDEA]C[IDEA]T[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]d[IDEA]i[IDEA]s[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]W[IDEA]S[IDEA]_[IDEA]D[IDEA]I[IDEA]S[IDEA]C[IDEA]O[IDEA]N[IDEA]N[IDEA]E[IDEA]C[IDEA]T[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]E[IDEA]R[IDEA]R[IDEA]O[IDEA]R[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]i[IDEA]n[IDEA]g[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA]:[IDEA] [IDEA]i[IDEA]n[IDEA]t[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]W[IDEA]S[IDEA]_[IDEA]R[IDEA]E[IDEA]C[IDEA]O[IDEA]N[IDEA]N[IDEA]E[IDEA]C[IDEA]T[IDEA]I[IDEA]N[IDEA]G[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]W[IDEA]A[IDEA]R[IDEA]N[IDEA]I[IDEA]N[IDEA]G[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA]=[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA]:[IDEA] [IDEA]i[IDEA]n[IDEA]t[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]W[IDEA]S[IDEA]_[IDEA]R[IDEA]E[IDEA]C[IDEA]O[IDEA]N[IDEA]N[IDEA]E[IDEA]C[IDEA]T[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA]=[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]d[IDEA]e[IDEA]a[IDEA]d[IDEA]_[IDEA]s[IDEA]t[IDEA]r[IDEA]e[IDEA]a[IDEA]m[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]W[IDEA]S[IDEA]_[IDEA]D[IDEA]E[IDEA]A[IDEA]D[IDEA]_[IDEA]S[IDEA]T[IDEA]R[IDEA]E[IDEA]A[IDEA]M[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]W[IDEA]A[IDEA]R[IDEA]N[IDEA]I[IDEA]N[IDEA]G[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]f[IDEA]a[IDEA]i[IDEA]l[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]D[IDEA]B[IDEA]_[IDEA]C[IDEA]O[IDEA]N[IDEA]N[IDEA]E[IDEA]C[IDEA]T[IDEA]_[IDEA]F[IDEA]A[IDEA]I[IDEA]L[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]E[IDEA]R[IDEA]R[IDEA]O[IDEA]R[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]=[IDEA]"[IDEA]D[IDEA]O[IDEA]W[IDEA]N[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]v[IDEA]e[IDEA]r[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]D[IDEA]B[IDEA]_[IDEA]R[IDEA]E[IDEA]C[IDEA]O[IDEA]V[IDEA]E[IDEA]R[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]=[IDEA]"[IDEA]U[IDEA]P[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]s[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]A[IDEA]L[IDEA]E[IDEA]R[IDEA]T[IDEA]_[IDEA]S[IDEA]E[IDEA]N[IDEA]T[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA]=[IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]s[IDEA]u[IDEA]p[IDEA]p[IDEA]r[IDEA]e[IDEA]s[IDEA]s[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]A[IDEA]L[IDEA]E[IDEA]R[IDEA]T[IDEA]_[IDEA]S[IDEA]U[IDEA]P[IDEA]P[IDEA]R[IDEA]E[IDEA]S[IDEA]S[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA]=[IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]n[IDEA]e[IDEA]w[IDEA]s[IDEA]_[IDEA]p[IDEA]r[IDEA]i[IDEA]m[IDEA]a[IDEA]r[IDEA]y[IDEA]_[IDEA]f[IDEA]a[IDEA]i[IDEA]l[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]N[IDEA]E[IDEA]W[IDEA]S[IDEA]_[IDEA]P[IDEA]R[IDEA]I[IDEA]M[IDEA]A[IDEA]R[IDEA]Y[IDEA]_[IDEA]F[IDEA]A[IDEA]I[IDEA]L[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]W[IDEA]A[IDEA]R[IDEA]N[IDEA]I[IDEA]N[IDEA]G[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]n[IDEA]e[IDEA]w[IDEA]s[IDEA]_[IDEA]f[IDEA]a[IDEA]l[IDEA]l[IDEA]b[IDEA]a[IDEA]c[IDEA]k[IDEA]_[IDEA]u[IDEA]s[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]N[IDEA]E[IDEA]W[IDEA]S[IDEA]_[IDEA]F[IDEA]A[IDEA]L[IDEA]L[IDEA]B[IDEA]A[IDEA]C[IDEA]K[IDEA]_[IDEA]U[IDEA]S[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]W[IDEA]A[IDEA]R[IDEA]N[IDEA]I[IDEA]N[IDEA]G[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]h[IDEA]e[IDEA]a[IDEA]l[IDEA]t[IDEA]h[IDEA]_[IDEA]c[IDEA]h[IDEA]e[IDEA]c[IDEA]k[IDEA]_[IDEA]f[IDEA]a[IDEA]i[IDEA]l[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]H[IDEA]E[IDEA]A[IDEA]L[IDEA]T[IDEA]H[IDEA]_[IDEA]C[IDEA]H[IDEA]E[IDEA]C[IDEA]K[IDEA]_[IDEA]F[IDEA]A[IDEA]I[IDEA]L[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]E[IDEA]R[IDEA]R[IDEA]O[IDEA]R[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]p[IDEA]e[IDEA]r[IDEA]f[IDEA]o[IDEA]r[IDEA]m[IDEA]a[IDEA]n[IDEA]c[IDEA]e[IDEA]_[IDEA]l[IDEA]o[IDEA]g[IDEA]g[IDEA]e[IDEA]d[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA],[IDEA] [IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA]:[IDEA] [IDEA]f[IDEA]l[IDEA]o[IDEA]a[IDEA]t[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]P[IDEA]E[IDEA]R[IDEA]F[IDEA]O[IDEA]R[IDEA]M[IDEA]A[IDEA]N[IDEA]C[IDEA]E[IDEA]_[IDEA]L[IDEA]O[IDEA]G[IDEA]G[IDEA]E[IDEA]D[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA]=[IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]r[IDEA]t[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA] [IDEA]=[IDEA] [IDEA]"[IDEA]s[IDEA]e[IDEA]r[IDEA]v[IDEA]i[IDEA]c[IDEA]e[IDEA] [IDEA]s[IDEA]t[IDEA]a[IDEA]r[IDEA]t[IDEA]i[IDEA]n[IDEA]g[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]S[IDEA]Y[IDEA]S[IDEA]T[IDEA]E[IDEA]M[IDEA]_[IDEA]S[IDEA]T[IDEA]A[IDEA]R[IDEA]T[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]r[IDEA]e[IDEA]a[IDEA]d[IDEA]y[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA]:[IDEA] [IDEA]s[IDEA]t[IDEA]r[IDEA] [IDEA]=[IDEA] [IDEA]"[IDEA]s[IDEA]e[IDEA]r[IDEA]v[IDEA]i[IDEA]c[IDEA]e[IDEA] [IDEA]r[IDEA]e[IDEA]a[IDEA]d[IDEA]y[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]([IDEA]"[IDEA]S[IDEA]Y[IDEA]S[IDEA]T[IDEA]E[IDEA]M[IDEA]_[IDEA]R[IDEA]E[IDEA]A[IDEA]D[IDEA]Y[IDEA]"[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA]=[IDEA]"[IDEA]I[IDEA]N[IDEA]F[IDEA]O[IDEA]"[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]k[IDEA]w[IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]P[IDEA]r[IDEA]i[IDEA]v[IDEA]a[IDEA]t[IDEA]e[IDEA] [IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]r[IDEA]s[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]-[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]_[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]_[IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]:[IDEA] [IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]_[IDEA]f[IDEA]n[IDEA] [IDEA]=[IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]L[IDEA]E[IDEA]V[IDEA]E[IDEA]L[IDEA]_[IDEA]M[IDEA]A[IDEA]P[IDEA].[IDEA]g[IDEA]e[IDEA]t[IDEA]([IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA],[IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]i[IDEA]n[IDEA]f[IDEA]o[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]m[IDEA]i[IDEA]t[IDEA]_[IDEA]f[IDEA]n[IDEA]([IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]_[IDEA]t[IDEA]y[IDEA]p[IDEA]e[IDEA],[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA] [IDEA]*[IDEA]*[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]o[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA]a[IDEA]l[IDEA]_[IDEA]k[IDEA]w[IDEA]a[IDEA]r[IDEA]g[IDEA]s[IDEA]([IDEA])[IDEA])[IDEA]
+[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]e[IDEA]f[IDEA] [IDEA]_[IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA]_[IDEA]d[IDEA]b[IDEA]([IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA],[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]:[IDEA] [IDEA]S[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]E[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA])[IDEA] [IDEA]-[IDEA]>[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]i[IDEA]f[IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]d[IDEA]b[IDEA] [IDEA]i[IDEA]s[IDEA] [IDEA]N[IDEA]o[IDEA]n[IDEA]e[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]r[IDEA]e[IDEA]t[IDEA]u[IDEA]r[IDEA]n[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]q[IDEA]l[IDEA] [IDEA]=[IDEA] [IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]I[IDEA]N[IDEA]S[IDEA]E[IDEA]R[IDEA]T[IDEA] [IDEA]I[IDEA]N[IDEA]T[IDEA]O[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA]_[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]s[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]([IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]s[IDEA]t[IDEA]a[IDEA]m[IDEA]p[IDEA],[IDEA] [IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA],[IDEA] [IDEA]m[IDEA]o[IDEA]d[IDEA]u[IDEA]l[IDEA]e[IDEA],[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]_[IDEA]t[IDEA]y[IDEA]p[IDEA]e[IDEA],[IDEA] [IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]y[IDEA]m[IDEA]b[IDEA]o[IDEA]l[IDEA],[IDEA] [IDEA]d[IDEA]i[IDEA]r[IDEA]e[IDEA]c[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA],[IDEA] [IDEA]s[IDEA]c[IDEA]o[IDEA]r[IDEA]e[IDEA],[IDEA] [IDEA]w[IDEA]s[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA],[IDEA] [IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA],[IDEA] [IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA],[IDEA] [IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]V[IDEA]A[IDEA]L[IDEA]U[IDEA]E[IDEA]S[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]([IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA],[IDEA] [IDEA]%[IDEA]s[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]"[IDEA]"[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]v[IDEA]a[IDEA]l[IDEA]u[IDEA]e[IDEA]s[IDEA] [IDEA]=[IDEA] [IDEA]([IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]t[IDEA]i[IDEA]m[IDEA]e[IDEA]s[IDEA]t[IDEA]a[IDEA]m[IDEA]p[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]l[IDEA]e[IDEA]v[IDEA]e[IDEA]l[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]m[IDEA]o[IDEA]d[IDEA]u[IDEA]l[IDEA]e[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]_[IDEA]t[IDEA]y[IDEA]p[IDEA]e[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]d[IDEA]e[IDEA]t[IDEA]a[IDEA]i[IDEA]l[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]s[IDEA]y[IDEA]m[IDEA]b[IDEA]o[IDEA]l[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]d[IDEA]i[IDEA]r[IDEA]e[IDEA]c[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]s[IDEA]c[IDEA]o[IDEA]r[IDEA]e[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]w[IDEA]s[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]r[IDEA]e[IDEA]c[IDEA]o[IDEA]n[IDEA]n[IDEA]e[IDEA]c[IDEA]t[IDEA]_[IDEA]a[IDEA]t[IDEA]t[IDEA]e[IDEA]m[IDEA]p[IDEA]t[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]a[IDEA]l[IDEA]e[IDEA]r[IDEA]t[IDEA]_[IDEA]i[IDEA]d[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]l[IDEA]a[IDEA]t[IDEA]e[IDEA]n[IDEA]c[IDEA]y[IDEA]_[IDEA]m[IDEA]s[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]t[IDEA]r[IDEA]y[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]w[IDEA]i[IDEA]t[IDEA]h[IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]d[IDEA]b[IDEA].[IDEA]c[IDEA]u[IDEA]r[IDEA]s[IDEA]o[IDEA]r[IDEA]([IDEA])[IDEA] [IDEA]a[IDEA]s[IDEA] [IDEA]c[IDEA]u[IDEA]r[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]c[IDEA]u[IDEA]r[IDEA].[IDEA]e[IDEA]x[IDEA]e[IDEA]c[IDEA]u[IDEA]t[IDEA]e[IDEA]([IDEA]s[IDEA]q[IDEA]l[IDEA],[IDEA] [IDEA]v[IDEA]a[IDEA]l[IDEA]u[IDEA]e[IDEA]s[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]s[IDEA]e[IDEA]l[IDEA]f[IDEA].[IDEA]_[IDEA]d[IDEA]b[IDEA].[IDEA]c[IDEA]o[IDEA]m[IDEA]m[IDEA]i[IDEA]t[IDEA]([IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]x[IDEA]c[IDEA]e[IDEA]p[IDEA]t[IDEA] [IDEA]E[IDEA]x[IDEA]c[IDEA]e[IDEA]p[IDEA]t[IDEA]i[IDEA]o[IDEA]n[IDEA] [IDEA]a[IDEA]s[IDEA] [IDEA]e[IDEA]x[IDEA]c[IDEA]:[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]#[IDEA] [IDEA]L[IDEA]o[IDEA]g[IDEA] [IDEA]D[IDEA]B[IDEA] [IDEA]w[IDEA]r[IDEA]i[IDEA]t[IDEA]e[IDEA] [IDEA]f[IDEA]a[IDEA]i[IDEA]l[IDEA]u[IDEA]r[IDEA]e[IDEA] [IDEA]t[IDEA]o[IDEA] [IDEA]s[IDEA]t[IDEA]d[IDEA]o[IDEA]u[IDEA]t[IDEA] [IDEA]o[IDEA]n[IDEA]l[IDEA]y[IDEA] [IDEA]([IDEA]a[IDEA]v[IDEA]o[IDEA]i[IDEA]d[IDEA] [IDEA]i[IDEA]n[IDEA]f[IDEA]i[IDEA]n[IDEA]i[IDEA]t[IDEA]e[IDEA] [IDEA]l[IDEA]o[IDEA]o[IDEA]p[IDEA])[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]l[IDEA]o[IDEA]g[IDEA].[IDEA]e[IDEA]r[IDEA]r[IDEA]o[IDEA]r[IDEA]([IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]"[IDEA]D[IDEA]B[IDEA]_[IDEA]W[IDEA]R[IDEA]I[IDEA]T[IDEA]E[IDEA]_[IDEA]F[IDEA]A[IDEA]I[IDEA]L[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]f[IDEA]"[IDEA]f[IDEA]a[IDEA]i[IDEA]l[IDEA]e[IDEA]d[IDEA] [IDEA]t[IDEA]o[IDEA] [IDEA]p[IDEA]e[IDEA]r[IDEA]s[IDEA]i[IDEA]s[IDEA]t[IDEA] [IDEA]s[IDEA]y[IDEA]s[IDEA]t[IDEA]e[IDEA]m[IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]:[IDEA] [IDEA]{[IDEA]e[IDEA]x[IDEA]c[IDEA]}[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]_[IDEA]t[IDEA]y[IDEA]p[IDEA]e[IDEA]=[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA].[IDEA]e[IDEA]v[IDEA]e[IDEA]n[IDEA]t[IDEA]_[IDEA]t[IDEA]y[IDEA]p[IDEA]e[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA]d[IDEA]b[IDEA]_[IDEA]s[IDEA]t[IDEA]a[IDEA]t[IDEA]u[IDEA]s[IDEA]=[IDEA]"[IDEA]D[IDEA]O[IDEA]W[IDEA]N[IDEA]"[IDEA],[IDEA]
+[IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA] [IDEA])[IDEA]
+[IDEA]

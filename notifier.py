@@ -356,6 +356,45 @@ _NEWS_TITLE_TRANSLATIONS = {
     "russia": "Rússia",
     "ukraine": "Ucrânia",
     "middle east": "Oriente Médio",
+    "bitcoin": "Bitcoin",
+    "ethereum": "Ethereum",
+    "crypto": "cripto",
+    "consolidates": "consolida",
+    "consolidation": "consolidação",
+    "volatility": "volatilidade",
+    "cools": "diminui",
+    "futures": "futuros",
+    "markets": "mercado",
+    "tilt": "inclinado",
+    "bearish": " baixista",
+    "quantum": "quântico",
+    "resistant": "resistente",
+    "blockchain": "blockchain",
+    "protocol": "protocolo",
+    "live": "lança",
+    "holiday": "feriado",
+    "weekend": "fim de semana",
+    "exposed": "exposto",
+    "cmf": "CME",
+    "flows": "fluxos",
+    "offline": "indisponível",
+    "author": "autor",
+    "doj": "Departamento de Justiça",
+    "enforcement": "aplicação da lei",
+    "memo": "memorando",
+    "interim": "interino",
+    "bill": "projeto de lei",
+    "release": "divulgado",
+    "pushed": "adiado",
+    "back": "para trás",
+    "industries": "indústrias",
+    "revised": "revisto",
+    "stable": "estável",
+    "structure": "estrutura",
+    "nasdaq": "Nasdaq",
+    "headline": "manchete",
+    "news": "notícia",
+    "report": "relatório",
 }
 
 def _translate_news_title(title: str) -> str:
@@ -370,7 +409,6 @@ def _translate_news_title(title: str) -> str:
         if en in title_lower:
             pattern = re.compile(re.escape(en), re.IGNORECASE)
             result = pattern.sub(pt, result, count=1)
-            break
     
     return result
 

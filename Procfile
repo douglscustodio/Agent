@@ -1,1 +1,2 @@
-worker: python main.py
+[IDEA]w[IDEA]o[IDEA]r[IDEA]k[IDEA]e[IDEA]r[IDEA]:[IDEA] [IDEA]p[IDEA]y[IDEA]t[IDEA]h[IDEA]o[IDEA]n[IDEA] [IDEA]m[IDEA]a[IDEA]i[IDEA]n[IDEA].[IDEA]p[IDEA]y[IDEA]
+[IDEA]

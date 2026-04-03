@@ -10,7 +10,7 @@ Mensagens:
 UPGRADE: Integração Claude AI
   - Cada sinal passa pelo ai_analyst antes de ser enviado
   - Análise em PT-BR: motivo + risco + tags contextuais
-  - Sinal com approve=False da IA → enviado com aviso ⚠️ (nunca bloqueado)
+  - Sinal com approve=False da IA → enviado com aviso [WARN] (nunca bloqueado)
 
 UPGRADE: Notícias linkáveis
   - Títulos de notícias em inglês são exibidos com link clicável
@@ -87,13 +87,13 @@ def _calc_levels(price: float, direction: str) -> Tuple[float, float, float, flo
 
 
 def _direction_emoji(d: str) -> str:
-    return "📈" if d.upper() == "LONG" else "📉"
+    return "[UP]" if d.upper() == "LONG" else "[DOWN]"
 
 
 def _band_label(band) -> str:
     if "HIGH_CONVICTION" in str(band):
-        return "🔥 ALTA CONVICÇÃO"
-    return "✅ VÁLIDO"
+        return "[HOT] ALTA CONVICÇÃO"
+    return "[OK] VÁLIDO"
 
 
 def _format_quality_indicator() -> str:
@@ -102,7 +102,7 @@ def _format_quality_indicator() -> str:
     lines = []
     
     if quality.warnings:
-        lines.append("*⚠️ QUALIDADE DOS DADOS:*")
+        lines.append("*[WARN] QUALIDADE DOS DADOS:*")
         for warning in quality.warnings[:3]:
             lines.append(warning)
         lines.append("")
@@ -111,14 +111,14 @@ def _format_quality_indicator() -> str:
 
 
 def _sentiment_pt(s: str) -> str:
-    return {"positive": "Positivo 🟢", "negative": "Negativo 🔴"}.get(s, "Neutro ⚪")
+    return {"positive": "Positivo [GREEN]", "negative": "Negativo [RED]"}.get(s, "Neutro [NEUTRAL]")
   
 def _direction_badge(d: str) -> str:
     """Retorna badge visual para LONG/SHORT em português."""
     if d.upper() == "LONG":
-        return "🔼 COMPRA LONGA"
+        return " COMPRA LONGA"
     else:
-        return "🔽 VENDA CURTA"
+        return " VENDA CURTA"
 
 
 # ---------------------------------------------------------------------------
@@ -147,19 +147,19 @@ _NEWS_KEYWORD_MAP = {
     "approval": "aprovação regulatória",
     "record": "recorde histórico",
     # Negativos
-    "hack": "⚠️ hack / ataque",
-    "exploit": "⚠️ exploit detectado",
-    "breach": "⚠️ brecha de segurança",
-    "scam": "⚠️ golpe / fraude",
-    "crash": "⚠️ queda acentuada",
-    "ban": "⚠️ proibição regulatória",
-    "lawsuit": "⚠️ processo judicial",
-    "sec": "⚠️ ação regulatória SEC",
-    "investigation": "⚠️ investigação",
+    "hack": "[WARN] hack / ataque",
+    "exploit": "[WARN] exploit detectado",
+    "breach": "[WARN] brecha de segurança",
+    "scam": "[WARN] golpe / fraude",
+    "crash": "[WARN] queda acentuada",
+    "ban": "[WARN] proibição regulatória",
+    "lawsuit": "[WARN] processo judicial",
+    "sec": "[WARN] ação regulatória SEC",
+    "investigation": "[WARN] investigação",
     "bearish": "viés baixista",
-    "dump": "⚠️ venda massiva",
-    "liquidation": "⚠️ liquidações",
-    "warning": "⚠️ alerta emitido",
+    "dump": "[WARN] venda massiva",
+    "liquidation": "[WARN] liquidações",
+    "warning": "[WARN] alerta emitido",
     # Neutros
     "update": "atualização de protocolo",
     "fee": "mudança de taxas",
@@ -439,8 +439,8 @@ def _format_news_line(news_ctx: NewsContext) -> str:
         return ""
 
     article = news_ctx.articles[0]
-    sentiment_emoji = {"positive": "🟢", "negative": "🔴"}.get(
-        news_ctx.aggregate_sentiment, "⚪"
+    sentiment_emoji = {"positive": "[GREEN]", "negative": "[RED]"}.get(
+        news_ctx.aggregate_sentiment, "[NEUTRAL]"
     )
     context_pt = _news_context_pt(news_ctx.top_headline)
     age_min    = round(news_ctx.freshness_minutes)
@@ -507,7 +507,7 @@ def _build_signal_message(
     memory        = None,
 ) -> str:
     lines = [
-        "🚨 *SINAL DE TRADE DETECTADO*",
+        " *SINAL DE TRADE DETECTADO*",
         f"_{_now_br()}_",
         "",
     ]
@@ -525,14 +525,14 @@ def _build_signal_message(
         sl        = 0.0
         tp1       = 0.0
 
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
         lines.append(f"{_direction_emoji(direction)} *{sym}/USDT — {direction}*")
         lines.append(f"Força do sinal: `{score:.0f}/100` {_band_label(band)}")
         if ai and ai.used_ai:
-            conf_emoji = "🟢" if ai.confidence >= 70 else ("🟡" if ai.confidence >= 55 else "🔴")
+            conf_emoji = "[GREEN]" if ai.confidence >= 70 else ("[YELLOW]" if ai.confidence >= 55 else "[RED]")
             lines.append(f"Confiança IA: `{ai.confidence}/100` {conf_emoji}")
             if not ai.approved:
-                lines.append("⚠️ *IA identificou sinal de cautela — leia o risco abaixo*")
+                lines.append("[WARN] *IA identificou sinal de cautela — leia o risco abaixo*")
         lines.append("")
 
         # Níveis de trade
@@ -541,27 +541,27 @@ def _build_signal_message(
             sl_pct  = abs(price - sl)  / price * 100
             tp1_pct = abs(tp1 - price) / price * 100
             tp2_pct = abs(tp2 - price) / price * 100
-            lines.append("*📌 COMO OPERAR:*")
+            lines.append("* COMO OPERAR:*")
             lines.append(f"• Entrada:   `${price:,.5f}`")
-            lines.append(f"• Stop Loss: `${sl:,.5f}` ⛔ ({sl_pct:.1f}% de risco)")
-            lines.append(f"• Alvo 1:   `${tp1:,.5f}` 🎯 (+{tp1_pct:.1f}%)")
-            lines.append(f"• Alvo 2:   `${tp2:,.5f}` 🎯 (+{tp2_pct:.1f}%)")
+            lines.append(f"• Stop Loss: `${sl:,.5f}`  ({sl_pct:.1f}% de risco)")
+            lines.append(f"• Alvo 1:   `${tp1:,.5f}` [TARGET] (+{tp1_pct:.1f}%)")
+            lines.append(f"• Alvo 2:   `${tp2:,.5f}` [TARGET] (+{tp2_pct:.1f}%)")
             lines.append(f"• Setor: {get_sector_label(sym)}")
             lines.append("")
 
         # UPGRADE: Explicação da IA em PT-BR
         if ai and ai.used_ai and ai.reason:
-            lines.append("*🤖 ANÁLISE IA (PT-BR):*")
+            lines.append("* ANÁLISE IA (PT-BR):*")
             lines.append(f"• {ai.reason}")
             if ai.risk_note:
-                lines.append(f"• ⚠️ Risco: {ai.risk_note}")
+                lines.append(f"• [WARN] Risco: {ai.risk_note}")
             if ai.context_tags:
                 tags_str = " · ".join(f"`{t}`" for t in ai.context_tags[:3])
                 lines.append(f"• Tags: {tags_str}")
             lines.append("")
         else:
             # Fallback: análise baseada em regras em PT-BR
-            lines.append("*🧠 POR QUE ESTE SINAL?*")
+            lines.append("* POR QUE ESTE SINAL?*")
             rs   = comp.get("relative_strength", 0)
             adx  = comp.get("adx_regime", 0)
             oi   = comp.get("oi_acceleration", 0)
@@ -570,25 +570,25 @@ def _build_signal_message(
             fund = comp.get("funding", 0)
 
             if rs >= 70 and adx >= 70:
-                lines.append("• 📊 Tendência forte — superando o BTC com força")
+                lines.append("• [STAT] Tendência forte — superando o BTC com força")
             elif rs >= 65:
-                lines.append("• 📊 Mais forte que o BTC no momento")
+                lines.append("• [STAT] Mais forte que o BTC no momento")
             elif adx >= 65:
-                lines.append("• 📊 Tendência clara no gráfico")
+                lines.append("• [STAT] Tendência clara no gráfico")
             else:
-                lines.append("• 📊 Movimento moderado — confirme no gráfico")
+                lines.append("• [STAT] Movimento moderado — confirme no gráfico")
 
             if oi >= 85:
-                lines.append("• 💰 Muito dinheiro entrando agora — alta convicção")
+                lines.append("• [MONEY] Muito dinheiro entrando agora — alta convicção")
             elif oi >= 65:
-                lines.append("• 💰 Interesse crescente de traders no ativo")
+                lines.append("• [MONEY] Interesse crescente de traders no ativo")
             elif oi < 45:
-                lines.append("• ⚠️ Interesse dos traders em queda — cautela")
+                lines.append("• [WARN] Interesse dos traders em queda — cautela")
 
             if fund >= 75:
-                lines.append("• 💸 Financiamento favorável para esta direção")
+                lines.append("•  Financiamento favorável para esta direção")
             elif fund <= 35:
-                lines.append("• ⚠️ Financiamento desfavorável — aumento do risco")
+                lines.append("• [WARN] Financiamento desfavorável — aumento do risco")
 
             if bb >= 75 and atr >= 75:
                 lines.append("• ⏱ Entrada no início do movimento — ótimo timing")
@@ -602,28 +602,28 @@ def _build_signal_message(
         if news_ctx and news_ctx.articles:
             news_line = _format_news_line(news_ctx)
             if news_line:
-                lines.append("*📰 NOTÍCIA RECENTE:*")
+                lines.append("*[NEWS] NOTÍCIA RECENTE:*")
                 lines.append(news_line)
                 lines.append("")
         elif not news_ctx or not news_ctx.articles:
-            lines.append("• 📰 _Configure CRYPTOPANIC\\_TOKEN para notícias em tempo real_")
+            lines.append("• [NEWS] _Configure CRYPTOPANIC\\_TOKEN para notícias em tempo real_")
             lines.append("")
 
         # Contexto macro
         if macro_snap:
-            bias_emoji = "🟢" if macro_snap.crypto_bias == "BULLISH" else (
-                "🔴" if macro_snap.crypto_bias == "BEARISH" else "⚪"
+            bias_emoji = "[GREEN]" if macro_snap.crypto_bias == "BULLISH" else (
+                "[RED]" if macro_snap.crypto_bias == "BEARISH" else "[NEUTRAL]"
             )
             bias_pt = {"BULLISH": "ALTISTA", "BEARISH": "BAIXISTA"}.get(
                 macro_snap.crypto_bias, "NEUTRO"
             )
-            lines.append("*🌍 CONTEXTO MACRO:*")
+            lines.append("*[WORLD] CONTEXTO MACRO:*")
             lines.append(f"• Risco de mercado: {macro_snap.risk_label}")
             lines.append(f"• Viés macro: {bias_emoji} {bias_pt}")
             if macro_snap.explanation:
                 lines.append(f"• {macro_snap.explanation[0]}")
             if macro_snap.risk_score > 70:
-                lines.append("• ⚠️ Risco macro alto — reduza o tamanho da posição")
+                lines.append("• [WARN] Risco macro alto — reduza o tamanho da posição")
             lines.append("")
 
         # Memória/aprendizado
@@ -636,14 +636,14 @@ def _build_signal_message(
                 macro_snap.risk_score if macro_snap else 50,
             )
             if insight.explanation:
-                lines.append("*🧠 O QUE O AGENTE APRENDEU:*")
+                lines.append("* O QUE O AGENTE APRENDEU:*")
                 for exp in insight.explanation[:2]:
                     lines.append(f"• {exp}")
                 if insight.ignore_signal:
-                    lines.append("• ⛔ ATENÇÃO: padrão histórico de baixa performance")
+                    lines.append("•  ATENÇÃO: padrão histórico de baixa performance")
                 lines.append("")
 
-        lines.append("*⚠️ GESTÃO DE RISCO:*")
+        lines.append("*[WARN] GESTÃO DE RISCO:*")
         lines.append("• Arrisque no máximo 1–2% do capital por operação")
         lines.append("• Respeite o Stop Loss — ele protege sua conta")
         lines.append("• Este é um sinal, não uma garantia de lucro")
@@ -658,7 +658,7 @@ def _build_signal_message(
             "time": _now_br(),
         })
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
     lines.append(_format_quality_indicator())
     lines.append("_Jarvis AI Trading Monitor_")
     return "\n".join(lines)
@@ -674,10 +674,10 @@ async def build_market_report(news_engine=None) -> str:
     sol_price = _get_price("SOL")
 
     lines = [
-        "📊 *RELATÓRIO DE MERCADO*",
+        "[STAT] *RELATÓRIO DE MERCADO*",
         f"_{_now_br()}_",
         "",
-        "*💹 Preços atuais:*",
+        "* Preços atuais:*",
     ]
 
     if btc_price > 0:
@@ -701,18 +701,18 @@ async def build_market_report(news_engine=None) -> str:
             regime = compute_adx(highs, lows, closes)
 
             regime_pt = {
-                "TRENDING": "📈 Em tendência",
-                "RANGING":  "↔️ Lateral / sem direção clara",
-                "WEAK":     "🔄 Tendência fraca",
+                "TRENDING": "[UP] Em tendência",
+                "RANGING":  "↔ Lateral / sem direção clara",
+                "WEAK":     " Tendência fraca",
             }.get(str(regime.regime).split(".")[-1], "Indefinido")
 
             dir_pt = {
-                "UP": "Para cima ⬆️",
-                "DOWN": "Para baixo ⬇️",
-                "NEUTRAL": "Neutro ➡️",
+                "UP": "Para cima ",
+                "DOWN": "Para baixo ",
+                "NEUTRAL": "Neutro ",
             }.get(regime.trend_direction, "Neutro")
 
-            lines.append("*📉 Regime do BTC (1h):*")
+            lines.append("*[DOWN] Regime do BTC (1h):*")
             lines.append(f"• Situação: {regime_pt}")
             lines.append(f"• Direção: {dir_pt}")
             lines.append(f"• Força da tendência (ADX): `{regime.adx:.1f}`")
@@ -725,11 +725,11 @@ async def build_market_report(news_engine=None) -> str:
         try:
             articles = news_engine._cache[:6] if news_engine._cache else []
             if articles:
-                lines.append("*📰 Últimas notícias:*")
+                lines.append("*[NEWS] Últimas notícias:*")
                 for a in articles[:4]:
                     age_min    = round((time.time() - a.published_at) / 60)
-                    emoji      = "🟢" if a.sentiment == "positive" else (
-                        "🔴" if a.sentiment == "negative" else "⚪"
+                    emoji      = "[GREEN]" if a.sentiment == "positive" else (
+                        "[RED]" if a.sentiment == "negative" else "[NEUTRAL]"
                     )
                     context_pt = _news_context_pt(a.title)
                     url        = getattr(a, "url", None) or getattr(a, "link", None)
@@ -744,7 +744,7 @@ async def build_market_report(news_engine=None) -> str:
             pass
 
     # Dica horária
-    lines.append("*💡 Dica do momento:*")
+    lines.append("*[IDEA] Dica do momento:*")
     hour = datetime.now(timezone.utc).hour
     if 0 <= hour < 6:
         lines.append("• Madrugada UTC — liquidez menor, cuidado com fakeouts")
@@ -756,7 +756,7 @@ async def build_market_report(news_engine=None) -> str:
         lines.append("• Monitore os níveis de suporte e resistência")
 
     lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
     lines.append("_Próximo relatório em 1 hora_")
     return "\n".join(lines)
 
@@ -781,7 +781,7 @@ async def check_btc_spike(notifier: "Notifier") -> None:
 
     if abs(pct_change) >= BTC_SPIKE_PCT and (now - _last_btc_alert) > BTC_ALERT_COOLDOWN:
         direction = "SUBIU" if pct_change > 0 else "CAIU"
-        emoji     = "🚀" if pct_change > 0 else "💥"
+        emoji     = "" if pct_change > 0 else ""
         impact    = "pode abrir oportunidades de LONG" if pct_change > 0 else (
             "cuidado — pode arrastar altcoins para baixo"
         )
@@ -819,7 +819,7 @@ async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
     global _daily_signals
 
     lines = [
-        "📋 *RESUMO DO DIA*",
+        "[LIST] *RESUMO DO DIA*",
         f"_{_now_br()}_",
         "",
     ]
@@ -828,9 +828,9 @@ async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
     if total == 0:
         lines.append("Nenhum sinal enviado hoje.")
     else:
-        lines.append(f"*📊 Sinais enviados hoje: {total}*")
+        lines.append(f"*[STAT] Sinais enviados hoje: {total}*")
         for s in _daily_signals[-10:]:
-            dir_emoji = "📈" if s["direction"] == "LONG" else "📉"
+            dir_emoji = "[UP]" if s["direction"] == "LONG" else "[DOWN]"
             lines.append(
                 f"• {dir_emoji} {s['symbol']} {s['direction']} — "
                 f"Score `{s['score']:.0f}` às {s['time'][-8:]}"
@@ -848,22 +848,22 @@ async def send_daily_summary(notifier: "Notifier", tracker=None) -> None:
             avg_pnl = stats.get("avg_pnl", 0.0)
 
             if total_r > 0:
-                lines.append("*🏆 Performance de hoje (24h):*")
-                lines.append(f"• ✅ Acertou (TP1): {tp1}")
-                lines.append(f"• ❌ Stop Loss: {sl_hit}")
-                lines.append(f"• ➖ Neutro: {neutral}")
+                lines.append("* Performance de hoje (24h):*")
+                lines.append(f"• [OK] Acertou (TP1): {tp1}")
+                lines.append(f"• [FAIL] Stop Loss: {sl_hit}")
+                lines.append(f"•  Neutro: {neutral}")
                 lines.append(f"• Taxa de acerto: `{win_r:.1f}%`")
                 lines.append(f"• PnL médio: `{avg_pnl:+.2f}%`")
                 lines.append("")
         except Exception as exc:
             log.warning("PERFORMANCE_LOGGED", f"daily summary stats error: {exc}")
 
-    lines.append("*💡 Lembre-se:*")
+    lines.append("*[IDEA] Lembre-se:*")
     lines.append("• Gerencie bem o risco — 1 a 2% por operação")
     lines.append("• Sinais são probabilidades, não certezas")
-    lines.append("• Amanhã é um novo dia de oportunidades 🚀")
+    lines.append("• Amanhã é um novo dia de oportunidades ")
     lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
     lines.append("_Jarvis AI Trading Monitor_")
 
     await notifier.send_system_alert("\n".join(lines))

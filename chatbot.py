@@ -656,8 +656,12 @@ class JarvisChatbot:
                 emoji = "🟢" if art.sentiment == "positive" else ("🔴" if art.sentiment == "negative" else "⚪")
                 age_min = (time.time() - art.published_at) / 60
                 translated_title = _translate_news_title(art.title)
-                title_short = translated_title[:80]
-                lines.append(f"{emoji} *{title_short}*")
+                title_short = translated_title[:100]
+                
+                if art.url:
+                    lines.append(f"{emoji} [{title_short}...]({art.url})")
+                else:
+                    lines.append(f"{emoji} *{title_short}*")
                 lines.append(f"   {age_min:.0f}min | Impacto: {art.impact_score:.0f}")
                 lines.append("")
             

@@ -129,29 +129,29 @@ def build_scheduler(
     """
     sched = AppScheduler()
 
-    # BTC regime refresh: 2 min
-    sched.add_interval_job(regime_fn,      minutes=2,  name="btc_regime",      jitter=5)
+    # BTC regime refresh: 5 min (era 2)
+    sched.add_interval_job(regime_fn,      minutes=5,  name="btc_regime",      jitter=10)
 
-    # News fetch: 3 min
-    sched.add_interval_job(news_fn,        minutes=3,  name="news_fetch",      jitter=15)
+    # News fetch: 10 min (era 3)
+    sched.add_interval_job(news_fn,        minutes=10,  name="news_fetch",      jitter=30)
 
-    # Full scan + ranking: 5 min
-    sched.add_interval_job(scan_fn,        minutes=5,  name="scan_cycle",      jitter=20)
+    # Full scan + ranking: 15 min (era 5)
+    sched.add_interval_job(scan_fn,        minutes=15,  name="scan_cycle",      jitter=60)
 
-    # BTC spike check: 5 min
+    # BTC spike check: 15 min (era 5)
     if btc_spike_fn:
-        sched.add_interval_job(btc_spike_fn, minutes=5, name="btc_spike",      jitter=10)
+        sched.add_interval_job(btc_spike_fn, minutes=15, name="btc_spike",      jitter=30)
 
-    # Performance checks: 1 hour
-    sched.add_interval_job(performance_fn, minutes=0,  name="perf_checks",     hours=1,  jitter=60)
+    # Performance checks: 2 hours (era 1)
+    sched.add_interval_job(performance_fn, minutes=0,  name="perf_checks",     hours=2,  jitter=120)
 
-    # Macro intelligence refresh: 30 min
+    # Macro intelligence refresh: 60 min (era 30)
     if macro_refresh_fn:
-        sched.add_interval_job(macro_refresh_fn, minutes=30, name="macro_refresh", jitter=60)
+        sched.add_interval_job(macro_refresh_fn, minutes=60, name="macro_refresh", jitter=120)
 
-    # Market report: 1 hour
+    # Market report: 3 hours (era 1)
     if market_report_fn:
-        sched.add_interval_job(market_report_fn, minutes=0, name="market_report", hours=1, jitter=120)
+        sched.add_interval_job(market_report_fn, minutes=0, name="market_report", hours=3, jitter=300)
 
     # Daily summary: 24 hours
     if daily_summary_fn:
@@ -160,9 +160,9 @@ def build_scheduler(
     # Adaptive weight update: 24 hours
     sched.add_interval_job(adaptive_fn,    minutes=0,  name="adaptive_tune",   hours=24, jitter=600)
 
-    # UPGRADE: AI learning + trade suggestions: every 2 hours
+    # UPGRADE: AI learning + trade suggestions: every 3 hours (era 2)
     if ai_learn_fn:
-        sched.add_interval_job(ai_learn_fn, minutes=0, name="ai_learn_suggest", hours=2, jitter=300)
+        sched.add_interval_job(ai_learn_fn, minutes=0, name="ai_learn_suggest", hours=3, jitter=300)
 
     # UPGRADE: DB event buffer flush every 15 seconds
     if flush_fn:

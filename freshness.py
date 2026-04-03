@@ -12,8 +12,8 @@ from logger import get_logger
 log = get_logger("freshness")
 
 # Maximum age in seconds before data is considered stale
-MAX_CANDLE_AGE_S: int   = 120   # 2 minutes
-MAX_SNAPSHOT_AGE_S: int = 30    # 30 seconds (derivatives tick data)
+MAX_CANDLE_AGE_S: int   = 1200  # 20 minutes (allows for 15m candles + network delay)
+MAX_SNAPSHOT_AGE_S: int = 300   # 5 minutes (derivatives tick data)
 
 
 @dataclass

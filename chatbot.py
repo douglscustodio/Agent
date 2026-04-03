@@ -74,12 +74,12 @@ class JarvisChatbot:
         }
         
         self._quick_tips = [
-            "💡 Digite /sinais para ver oportunidades de trade",
-            "💡 Use /ai + sua pergunta para conversar comigo",
-            "💡 /news mostra as últimas notícias do mercado",
-            "💡 /status verifica se tudo está funcionando",
-            "💡 /risk mostra status de proteção de risco",
-            "💡 /learn mostra o que eu aprendi dos seus trades",
+            "[IDEA] Digite /sinais para ver oportunidades de trade",
+            "[IDEA] Use /ai + sua pergunta para conversar comigo",
+            "[IDEA] /news mostra as últimas notícias do mercado",
+            "[IDEA] /status verifica se tudo está funcionando",
+            "[IDEA] /risk mostra status de proteção de risco",
+            "[IDEA] /learn mostra o que eu aprendi dos seus trades",
         ]
 
     def set_system_refs(self, **refs) -> None:
@@ -144,7 +144,7 @@ class JarvisChatbot:
         self._signal_alerted_today[key] = time.time()
         self._last_scores[key] = score
         
-        emoji = "📈" if direction == "LONG" else "📉"
+        emoji = "[UP]" if direction == "LONG" else "[DOWN]"
         msg = (
             f"{emoji} *OPORTUNIDADE DETECTADA!*\n\n"
             f"{symbol}/USDT — {direction}\n"
@@ -162,7 +162,7 @@ class JarvisChatbot:
         self._last_scores.clear()
 
     async def alert_btc_spike(self, direction: str, pct: float, price: float) -> None:
-        emoji = "🚀" if direction == "UP" else "💥"
+        emoji = "" if direction == "UP" else ""
         msg = (
             f"{emoji} *ALERTA BTC*\n\n"
             f"BTC {direction} `{pct:+.1f}%`\n"
@@ -182,11 +182,11 @@ class JarvisChatbot:
         self._last_macro_alert = time.time()
         
         if risk_score >= 70:
-            emoji = "⚠️"
+            emoji = "[WARN]"
         elif risk_score >= 50:
-            emoji = "💡"
+            emoji = "[IDEA]"
         else:
-            emoji = "✅"
+            emoji = "[OK]"
         msg = (
             f"{emoji} *Contexto Macro*\n\n"
             f"Índice de risco: {risk_score:.0f}/100\n"
@@ -197,7 +197,7 @@ class JarvisChatbot:
 
     async def alert_data_issue(self, issue: str) -> None:
         msg = (
-            f"⚠️ *AVISO DO SISTEMA*\n\n"
+            f"[WARN] *AVISO DO SISTEMA*\n\n"
             f"{issue}\n\n"
             "Dados podem estar desatualizados."
         )
@@ -208,11 +208,11 @@ class JarvisChatbot:
         win_rate = stats.get("win_rate", 0)
         pnl = stats.get("avg_pnl", 0)
         msg = (
-            "📊 *RESUMO DIÁRIO*\n\n"
+            "[STAT] *RESUMO DIÁRIO*\n\n"
             f"Sinais enviados: {total}\n"
             f"Taxa de acerto: {win_rate:.1f}%\n"
             f"PnL médio: {pnl:+.2f}%\n\n"
-            "Keep going! 🚀"
+            "Keep going! "
         )
         await self.send_alert(msg)
 
@@ -285,7 +285,7 @@ class JarvisChatbot:
                 return await self._handle_photo(chat_id, photo)
             elif document:
                 return await self._handle_document(chat_id, document)
-            return "📎 Tipo de mensagem não suportado.\n\nDigite /help para ver o que posso fazer!"
+            return " Tipo de mensagem não suportado.\n\nDigite /help para ver o que posso fazer!"
         
         if not text:
             return ""
@@ -314,14 +314,14 @@ class JarvisChatbot:
                     return response
                 except Exception as exc:
                     log.error("CHATBOT_ERROR", f"command error {cmd}: {exc}")
-                    return f"❌ Erro ao executar comando: {exc}"
+                    return f"[FAIL] Erro ao executar comando: {exc}"
             else:
-                return f"❓ Comando '{cmd}' não reconhecido. Digite /help para ver comandos disponíveis."
+                return f" Comando '{cmd}' não reconhecido. Digite /help para ver comandos disponíveis."
         
         if len(text) > 3:
             return await self._cmd_ai(chat_id, text)
         
-        return "💬 Quer ajuda? Digite /help para ver o que posso fazer!"
+        return " Quer ajuda? Digite /help para ver o que posso fazer!"
 
     def _add_welcome_tip(self, response: str) -> str:
         import random
@@ -336,43 +336,43 @@ class JarvisChatbot:
             # Pegar a foto de maior resolução
             photo_id = photo[-1].get("file_id") if photo else None
             if not photo_id:
-                return "📷 Não consegui processar a imagem. Tente novamente."
+                return " Não consegui processar a imagem. Tente novamente."
             
             # Baixar a imagem
             file_url = f"{self._api_base}/getFile?file_id={photo_id}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(file_url) as resp:
                     if resp.status != 200:
-                        return "📷 Erro ao baixar imagem."
+                        return " Erro ao baixar imagem."
                     file_data = await resp.json()
             
             file_path = file_data.get("result", {}).get("file_path")
             if not file_path:
-                return "📷 Não consegui acessar a imagem."
+                return " Não consegui acessar a imagem."
             
             # Baixar imagem em alta resolução
             download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(download_url) as resp:
                     if resp.status != 200:
-                        return "📷 Erro ao baixar imagem."
+                        return " Erro ao baixar imagem."
                     image_bytes = await resp.read()
             
             # Enviar para IA analisar
             api_key = os.getenv("GROQ_API_KEY", "")
             if not api_key:
-                return "🤖 IA não disponível. Configure GROQ_API_KEY para analisar imagens."
+                return " IA não disponível. Configure GROQ_API_KEY para analisar imagens."
             
             # Analisar com visão
             result = await self._analyze_image(image_bytes, api_key)
             if result:
-                return f"📊 *Análise da Imagem*\n\n{result}\n\n_Jarvis AI Trading Monitor_"
+                return f"[STAT] *Análise da Imagem*\n\n{result}\n\n_Jarvis AI Trading Monitor_"
             else:
-                return "🤖 Erro ao analisar imagem. Tente novamente."
+                return " Erro ao analisar imagem. Tente novamente."
                 
         except Exception as exc:
             log.error("CHATBOT_IMAGE_ERROR", f"failed: {exc}")
-            return f"📷 Erro ao processar imagem: {exc}"
+            return f" Erro ao processar imagem: {exc}"
     
     async def _handle_document(self, chat_id: str, document: dict) -> str:
         """Processa documento enviado."""
@@ -384,7 +384,7 @@ class JarvisChatbot:
         if "image" in mime:
             return await self._handle_photo(chat_id, [{"file_id": file_id}])
         
-        return f"📄 Documento '{file_name}' recebido.\n\nNo momento só suporto imagens para análise.\nTente enviar um print ou screenshot."
+        return f" Documento '{file_name}' recebido.\n\nNo momento só suporto imagens para análise.\nTente enviar um print ou screenshot."
     
     async def _handle_url(self, chat_id: str, text: str) -> str:
         """Analisa conteúdo de URL enviada."""
@@ -404,7 +404,7 @@ class JarvisChatbot:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status != 200:
-                        return f"🔗 Não consegui acessar a URL (status: {resp.status})"
+                        return f" Não consegui acessar a URL (status: {resp.status})"
                     
                     content_type = resp.headers.get("Content-Type", "")
                     
@@ -424,23 +424,23 @@ class JarvisChatbot:
                         text_content = ' '.join(lines)[:3000]
                         
                         if not text_content:
-                            return "🔗 Conteúdo da página não pôde ser extraído."
+                            return " Conteúdo da página não pôde ser extraído."
                         
                         # Analisar com IA
                         api_key = os.getenv("GROQ_API_KEY", "")
                         if not api_key:
-                            return f"🔗 *Conteúdo da URL:*\n\n{text_content[:1000]}...\n\nConfigure GROQ_API_KEY para análise com IA."
+                            return f" *Conteúdo da URL:*\n\n{text_content[:1000]}...\n\nConfigure GROQ_API_KEY para análise com IA."
                         
                         analysis = await self._analyze_url_content(url, text_content, api_key)
                         return analysis
                     else:
-                        return f"🔗 URL acessível mas conteúdo não é HTML. Tipo: {content_type[:50]}"
+                        return f" URL acessível mas conteúdo não é HTML. Tipo: {content_type[:50]}"
                         
         except asyncio.TimeoutError:
-            return "🔗 Tempo esgotado ao acessar URL. A página pode estar lenta."
+            return " Tempo esgotado ao acessar URL. A página pode estar lenta."
         except Exception as exc:
             log.error("CHATBOT_URL_ERROR", f"failed: {exc}")
-            return f"🔗 Erro ao acessar URL: {exc}"
+            return f" Erro ao acessar URL: {exc}"
     
     async def _analyze_image(self, image_bytes: bytes, api_key: str) -> Optional[str]:
         """Analisa imagem com IA."""
@@ -511,76 +511,76 @@ class JarvisChatbot:
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as resp:
                     if resp.status != 200:
-                        return f"🔗 *Conteúdo da URL:*\n\n{content[:1000]}...\n\n(IA indisponível para análise)"
+                        return f" *Conteúdo da URL:*\n\n{content[:1000]}...\n\n(IA indisponível para análise)"
                     
                     data = await resp.json()
                     analysis = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    return f"🔗 *Análise da URL*\n\n📄 {url}\n\n{analysis}\n\n_Jarvis AI Trading Monitor_"
+                    return f" *Análise da URL*\n\n {url}\n\n{analysis}\n\n_Jarvis AI Trading Monitor_"
                     
         except Exception as exc:
             log.error("CHATBOT_URL_AI", f"failed: {exc}")
-            return f"🔗 *Conteúdo:*\n\n{content[:1000]}...\n\n(Erro na análise: {exc})"
+            return f" *Conteúdo:*\n\n{content[:1000]}...\n\n(Erro na análise: {exc})"
 
     async def _cmd_start(self, chat_id: str, args: str) -> str:
         log.info("CHATBOT_START", f"start command from {chat_id}")
         
         return (
-            "👋 *Bem-vindo ao Jarvis AI Trading Monitor!*\n\n"
+            " *Bem-vindo ao Jarvis AI Trading Monitor!*\n\n"
             "Sou seu assistente pessoal de trading de criptomoedas.\n"
             "Estou monitorando o mercado 24/7 e te alertando sobre oportunidades.\n\n"
             "*Comandos:*\n"
-            "📊 /sinais — Ver oportunidades de trade\n"
-            "📰 /news — Últimas notícias\n"
-            "🌍 /macro — Contexto macroeconômico\n"
-            "🛡️ /risk — Gerenciar riscos\n"
-            "🤖 /ai [pergunta] — Pergunte qualquer coisa\n"
-            "🔍 /status — Status do sistema\n"
-            "📊 /debug — Diagnóstico completo\n\n"
+            "[STAT] /sinais — Ver oportunidades de trade\n"
+            "[NEWS] /news — Últimas notícias\n"
+            "[WORLD] /macro — Contexto macroeconômico\n"
+            " /risk — Gerenciar riscos\n"
+            " /ai [pergunta] — Pergunte qualquer coisa\n"
+            " /status — Status do sistema\n"
+            "[STAT] /debug — Diagnóstico completo\n\n"
             "_Use /help para ver todos os comandos_"
         )
 
     async def _cmd_help(self, chat_id: str, args: str) -> str:
         return (
-            "📚 *Todos os Comandos*\n\n"
-            "🔍 *Mercado:*\n"
+            " *Todos os Comandos*\n\n"
+            " *Mercado:*\n"
             "/sinais    - Ver oportunidades de trade\n"
             "/news      - Últimas notícias\n"
             "/macro     - Contexto macroeconômico\n\n"
-            "📊 *Sistema:*\n"
+            "[STAT] *Sistema:*\n"
             "/status    - Como está o sistema\n"
             "/performance - Nossos resultados\n"
             "/debug     - Diagnóstico completo\n\n"
-            "🧠 *Aprendizado:*\n"
+            " *Aprendizado:*\n"
             "/learn     - Ver o que eu aprendi\n\n"
-            "🤖 *Conversar:*\n"
+            " *Conversar:*\n"
             "/ai [pergunta] - Fazer qualquer pergunta\n"
             "Ex: /ai BTC vai subir?\n\n"
-            "⚡ *Ações:*\n"
+            " *Ações:*\n"
             "/scan - Forçar nova análise\n\n"
-            "💡 *Dica:* Pode perguntar direto também!"
+            "[IDEA] *Dica:* Pode perguntar direto também!"
         )
 
     async def _cmd_status(self, chat_id: str, args: str) -> str:
         quality = get_current_quality()
         
-        emoji_hl = "✅" if quality.hyperliquid_available else "❌"
-        emoji_ws = "✅" if quality.ws_connected else "⚠️"
-        emoji_news = "✅" if quality.news_api_available else "❌"
-        emoji_macro = "✅" if quality.macro_api_available else "❌"
-        emoji_ai = "✅" if quality.ai_available else "❌"
+        emoji_hl = "[OK]" if quality.hyperliquid_available else "[FAIL]"
+        emoji_ws = "[OK]" if quality.ws_connected else "[WARN]"
+        emoji_news = "[OK]" if quality.news_api_available else "[FAIL]"
+        emoji_macro = "[OK]" if quality.macro_api_available else "[FAIL]"
+        emoji_ai = "[OK]" if quality.ai_available else "[FAIL]"
         
         status_lines = [
-            "📊 *Status do Sistema*",
+            "[STAT] *Status do Sistema*",
             f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
             "",
-            "*🔗 Conexões:*",
+            "* Conexões:*",
             f"• Hyperliquid: {emoji_hl} Preços em tempo real",
             f"• WebSocket: {emoji_ws} {"Atualizações live" if quality.ws_connected else "Reconectando..."}",
             f"• Notícias: {emoji_news} Fontes ativas",
             f"• Macro: {emoji_macro} Dados econômicos",
             f"• IA Groq: {emoji_ai} {"Disponível" if quality.ai_available else "Sem IA"}",
             "",
-            "*📡 Qualidade:*",
+            "* Qualidade:*",
             f"• {quality.quality_label}",
             f"• Dados de mercado: {quality.market_age_minutes:.0f}min",
             f"• Notícias: {quality.news_age_minutes:.0f}min",
@@ -589,7 +589,7 @@ class JarvisChatbot:
         
         if quality.warnings:
             status_lines.append("")
-            status_lines.append("*⚠️ Atenção:*")
+            status_lines.append("*[WARN] Atenção:*")
             for w in quality.warnings[:2]:
                 status_lines.append(w)
         
@@ -602,9 +602,9 @@ class JarvisChatbot:
         ranking = self._system_refs.get("last_ranking")
         
         if not ranking or not ranking.top:
-            ws_status = "✅ Conectado" if _ws_state.get("status") == "CONNECTED" else "❌ Desconectado"
+            ws_status = "[OK] Conectado" if _ws_state.get("status") == "CONNECTED" else "[FAIL] Desconectado"
             return (
-                "📭 *Nenhum sinal agora*\n\n"
+                " *Nenhum sinal agora*\n\n"
                 "O sistema monitora 24/7, mas nem sempre há oportunidades claras.\n"
                 f"Status WebSocket: {ws_status}\n"
                 "• Tente /scan para forçar uma análise\n"
@@ -613,13 +613,13 @@ class JarvisChatbot:
             )
         
         lines = [
-            "🚨 *Sinais de Trade*",
+            " *Sinais de Trade*",
             f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
             "",
         ]
         
         for i, sig in enumerate(ranking.top[:3], 1):
-            emoji = "📈" if sig.direction == "LONG" else "📉"
+            emoji = "[UP]" if sig.direction == "LONG" else "[DOWN]"
             lines.append(f"{i}. {emoji} *{sig.symbol}/USDT* — {sig.direction}")
             lines.append(f"   Score: `{sig.score:.0f}/100`")
             lines.append(f"   Band: {sig.band}")
@@ -638,22 +638,22 @@ class JarvisChatbot:
         news_engine = self._system_refs.get("news_engine")
         
         if not news_engine:
-            return "📰 *Notícias*\n\nSistema de notícias não disponível."
+            return "[NEWS] *Notícias*\n\nSistema de notícias não disponível."
         
         try:
             articles = news_engine._cache[:5] if hasattr(news_engine, "_cache") and news_engine._cache else []
             
             if not articles:
-                return "📰 *Notícias*\n\nNenhuma notícia disponível. O sistema pode estar buscando dados..."
+                return "[NEWS] *Notícias*\n\nNenhuma notícia disponível. O sistema pode estar buscando dados..."
             
             lines = [
-                "📰 *Últimas Notícias*",
+                "[NEWS] *Últimas Notícias*",
                 f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
                 "",
             ]
             
             for art in articles:
-                emoji = "🟢" if art.sentiment == "positive" else ("🔴" if art.sentiment == "negative" else "⚪")
+                emoji = "[GREEN]" if art.sentiment == "positive" else ("[RED]" if art.sentiment == "negative" else "[NEUTRAL]")
                 age_min = (time.time() - art.published_at) / 60
                 translated_title = _translate_news_title(art.title)
                 title_short = translated_title[:100]
@@ -669,22 +669,22 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"news error: {exc}")
-            return f"📰 *Notícias*\n\nErro ao buscar notícias: {exc}"
+            return f"[NEWS] *Notícias*\n\nErro ao buscar notícias: {exc}"
 
     async def _cmd_macro(self, chat_id: str, args: str) -> str:
         macro_engine = self._system_refs.get("macro_engine")
         
         if not macro_engine:
-            return "🌍 *Macro*\n\nSistema macro não disponível."
+            return "[WORLD] *Macro*\n\nSistema macro não disponível."
         
         try:
             snap = macro_engine.get_snapshot()
             
             if not snap:
-                return "🌍 *Contexto Macroeconômico*\n\nDados macro ainda carregando..."
+                return "[WORLD] *Contexto Macroeconômico*\n\nDados macro ainda carregando..."
             
             lines = [
-                "🌍 *Contexto Macroeconômico*",
+                "[WORLD] *Contexto Macroeconômico*",
                 f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
                 "",
                 f"*Risco: {snap.risk_label}*",
@@ -700,12 +700,12 @@ class JarvisChatbot:
             ]:
                 md = getattr(snap, attr, None)
                 if md:
-                    arrow = "⬆️" if md.trend == "UP" else ("⬇️" if md.trend == "DOWN" else "➡️")
+                    arrow = "" if md.trend == "UP" else ("" if md.trend == "DOWN" else "")
                     lines.append(f"• {label}: `{md.price:,.2f}` {arrow} ({md.change_pct:+.2f}%)")
             
             if snap.explanation:
                 lines.append("")
-                lines.append("*💡 Análise:*")
+                lines.append("*[IDEA] Análise:*")
                 for exp in snap.explanation[:3]:
                     lines.append(f"• {exp}")
             
@@ -714,19 +714,19 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"macro error: {exc}")
-            return f"🌍 *Macro*\n\nErro ao buscar dados macro: {exc}"
+            return f"[WORLD] *Macro*\n\nErro ao buscar dados macro: {exc}"
 
     async def _cmd_performance(self, chat_id: str, args: str) -> str:
         tracker = self._system_refs.get("tracker")
         
         if not tracker:
-            return "📈 *Performance*\n\nSistema de tracking não disponível."
+            return "[UP] *Performance*\n\nSistema de tracking não disponível."
         
         try:
             stats = await tracker.get_recent_stats(days=7)
             
             lines = [
-                "📈 *Performance (7 dias)*",
+                "[UP] *Performance (7 dias)*",
                 f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
                 "",
             ]
@@ -741,8 +741,8 @@ class JarvisChatbot:
                 lines.append("Nenhum sinal registrado ainda.")
             else:
                 lines.append(f"*Total de sinais: {total}*")
-                lines.append(f"• ✅ Acertos (TP1): {tp1}")
-                lines.append(f"• ❌ Stop Loss: {sl}")
+                lines.append(f"• [OK] Acertos (TP1): {tp1}")
+                lines.append(f"• [FAIL] Stop Loss: {sl}")
                 lines.append(f"• Taxa de acerto: `{win_rate:.1f}%`")
                 lines.append(f"• PnL médio: `{avg_pnl:+.2f}%`")
             
@@ -751,13 +751,13 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"performance error: {exc}")
-            return f"📈 *Performance*\n\nErro ao buscar performance: {exc}"
+            return f"[UP] *Performance*\n\nErro ao buscar performance: {exc}"
 
     async def _cmd_learn(self, chat_id: str, args: str) -> str:
         tracker = self._system_refs.get("tracker")
         
         if not tracker:
-            return "🧠 *Aprendizado*\n\nSistema de tracking não disponível."
+            return " *Aprendizado*\n\nSistema de tracking não disponível."
         
         try:
             from proactive_agent import ProactiveAgent
@@ -767,7 +767,7 @@ class JarvisChatbot:
             
             if not records:
                 return (
-                    "🧠 *O que eu aprendi*\n\n"
+                    " *O que eu aprendi*\n\n"
                     "Ainda não tenho dados suficientes para aprender.\n"
                     "Aguarde mais trades para eu analisar padrões."
                 )
@@ -775,17 +775,17 @@ class JarvisChatbot:
             insights = await proactive.learn_from_outcomes(records)
             
             lines = [
-                "🧠 *O QUE EU APRENDI*\n",
+                " *O QUE EU APRENDI*\n",
                 f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_\n",
             ]
             
             overall_wr = insights.get("overall_win_rate", 0)
-            lines.append(f"📊 Win rate geral: `{overall_wr:.1f}%`")
+            lines.append(f"[STAT] Win rate geral: `{overall_wr:.1f}%`")
             lines.append("")
             
             long_wr = insights.get("win_rate_by_direction", {}).get("LONG", {}).get("win_rate", 0)
             short_wr = insights.get("win_rate_by_direction", {}).get("SHORT", {}).get("win_rate", 0)
-            lines.append(f"📈 LONGs: `{long_wr:.1f}%` | 📉 SHORTs: `{short_wr:.1f}%`")
+            lines.append(f"[UP] LONGs: `{long_wr:.1f}%` | [DOWN] SHORTs: `{short_wr:.1f}%`")
             lines.append("")
             
             best_symbols = insights.get("best_symbols", {})
@@ -796,7 +796,7 @@ class JarvisChatbot:
                     reverse=True
                 )[:3]
                 if sorted_symbols:
-                    lines.append("*🏆 Melhores símbolos:*")
+                    lines.append("* Melhores símbolos:*")
                     for sym, data in sorted_symbols:
                         wr = data.get("win_rate", 0)
                         total = data.get("total", 0)
@@ -821,7 +821,7 @@ class JarvisChatbot:
             return "\n".join(lines)
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"learn error: {exc}")
-            return f"🧠 *Aprendizado*\n\nErro ao analisar padrões: {exc}"
+            return f" *Aprendizado*\n\nErro ao analisar padrões: {exc}"
 
     async def _cmd_debug(self, chat_id: str, args: str) -> str:
         """Mostra diagnóstico detalhado do sistema."""
@@ -830,42 +830,42 @@ class JarvisChatbot:
         from kill_switch import KillSwitch
         
         lines = [
-            "🔍 *DIAGNÓSTICO DO SISTEMA*",
+            " *DIAGNÓSTICO DO SISTEMA*",
             f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
             "",
         ]
         
         quality = get_current_quality()
-        lines.append("*📊 Qualidade dos Dados:*")
+        lines.append("*[STAT] Qualidade dos Dados:*")
         lines.append(f"• Score: `{quality.quality_score:.0%}`")
-        lines.append(f"• Status: {'✅ OK' if not quality.should_block_signals else '❌ BLOQUEADO'}")
-        lines.append(f"• Hyperliquid: {'✅' if quality.hyperliquid_available else '❌'}")
+        lines.append(f"• Status: {'[OK] OK' if not quality.should_block_signals else '[FAIL] BLOQUEADO'}")
+        lines.append(f"• Hyperliquid: {'[OK]' if quality.hyperliquid_available else '[FAIL]'}")
         lines.append(f"• Symbols: {quality.symbols_with_data}/{quality.symbols_requested}")
         lines.append(f"• Dados frescos: {quality.market_age_minutes:.0f}min")
         lines.append("")
         
         ws_status = ws_state.get("status", "UNKNOWN")
         ws_last = ws_state.get("last_message_at", "nunca")
-        lines.append("*🌐 WebSocket:*")
+        lines.append("* WebSocket:*")
         lines.append(f"• Status: {ws_status}")
         lines.append(f"• Último msg: {ws_last}")
         lines.append("")
         
         kill_switch = KillSwitch()
-        lines.append("*🛑 Kill Switch:*")
-        lines.append(f"• Pode operar: {'✅ SIM' if kill_switch.can_trade() else '❌ NÃO'}")
+        lines.append("*[KILL] Kill Switch:*")
+        lines.append(f"• Pode operar: {'[OK] SIM' if kill_switch.can_trade() else '[FAIL] NÃO'}")
         if not kill_switch.can_trade():
             status = kill_switch.get_status()
             lines.append(f"• Motivo: {status.reason}")
         lines.append("")
         
         groq_key = os.getenv("GROQ_API_KEY", "")
-        lines.append("*🤖 IA (Groq):*")
-        lines.append(f"• API Key: {'✅ Configurada' if groq_key else '❌ NÃO CONFIGURADA'}")
+        lines.append("* IA (Groq):*")
+        lines.append(f"• API Key: {'[OK] Configurada' if groq_key else '[FAIL] NÃO CONFIGURADA'}")
         lines.append("")
         
         ranking = self._system_refs.get("last_ranking")
-        lines.append("*📈 Últimos Sinais:*")
+        lines.append("*[UP] Últimos Sinais:*")
         if ranking and ranking.top:
             lines.append(f"• Qtd: {len(ranking.top)} sinais")
             for s in ranking.top[:3]:
@@ -881,7 +881,7 @@ class JarvisChatbot:
         
         if not scan_fn:
             log.error("CHATBOT_SCAN", "scanner_module not in _system_refs")
-            return "⚡ *Scan*\n\nScanner não disponível.\n\nUse /debug para ver o que está bloqueando."
+            return " *Scan*\n\nScanner não disponível.\n\nUse /debug para ver o que está bloqueando."
         
         try:
             log.info("CHATBOT_SCAN", "Starting scan from chatbot command")
@@ -890,10 +890,10 @@ class JarvisChatbot:
             
             if ranking and ranking.top:
                 count = len(ranking.top)
-                lines = [f"✅ *Sinais Encontrados*\n\n"]
+                lines = [f"[OK] *Sinais Encontrados*\n\n"]
                 for sig in ranking.top[:3]:
-                    emoji = "📈" if sig.direction == "LONG" else "📉"
-                    band_emoji = "🔥" if "HIGH" in str(sig.band) else "✅"
+                    emoji = "[UP]" if sig.direction == "LONG" else "[DOWN]"
+                    band_emoji = "[HOT]" if "HIGH" in str(sig.band) else "[OK]"
                     lines.append(f"{emoji} {sig.symbol}/USDT {band_emoji}\n   {sig.direction} | Score: `{sig.score:.0f}`")
                     if hasattr(sig, 'components') and sig.components:
                         lines.append(f"   RS={sig.components.get('relative_strength',0):.0f} ADX={sig.components.get('adx_regime',0):.0f}")
@@ -906,17 +906,17 @@ class JarvisChatbot:
                     details.append(f"Valid: {ranking.total_valid}")
                     details.append(f"Watchlist: {len(ranking.watchlist) if ranking.watchlist else 0}")
                     details.append(f"Rejected: {len(ranking.rejected) if ranking.rejected else 0}")
-                return "⚡ *Scan*\n\nNenhum sinal encontrado.\n\n" + "\n".join(details) if details else ""
+                return " *Scan*\n\nNenhum sinal encontrado.\n\n" + "\n".join(details) if details else ""
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"scan error: {exc}")
-            return f"⚡ *Scan*\n\nErro ao executar scan: {exc}\n\nUse /debug para diagnóstico completo."
+            return f" *Scan*\n\nErro ao executar scan: {exc}\n\nUse /debug para diagnóstico completo."
 
     async def _cmd_risk(self, chat_id: str, args: str) -> str:
         risk_manager = self._system_refs.get("risk_manager")
         kill_switch = self._system_refs.get("kill_switch")
         
         lines = [
-            "🛡️ *Status de Risco*",
+            " *Status de Risco*",
             f"_{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}_",
             "",
         ]
@@ -924,22 +924,22 @@ class JarvisChatbot:
         if kill_switch:
             status = kill_switch.get_status()
             if status.is_active:
-                lines.append("🛑 *KILL SWITCH ATIVO*")
+                lines.append("[KILL] *KILL SWITCH ATIVO*")
                 lines.append(f"Motivo: {status.reason}")
             else:
-                lines.append("✅ *Kill Switch: OFF*")
+                lines.append("[OK] *Kill Switch: OFF*")
             
             lines.append(f"• P&L Diário: `{status.daily_pnl_pct*100:+.2f}%`")
             lines.append(f"• Perdas Consecutivas: {status.consecutive_losses}")
             lines.append(f"• Trades Hoje: {status.trades_today}")
-            lines.append(f"• Pode Operar: {'✅ SIM' if not status.block_new_trades else '❌ NÃO'}")
+            lines.append(f"• Pode Operar: {'[OK] SIM' if not status.block_new_trades else '[FAIL] NÃO'}")
             lines.append("")
         
         if risk_manager:
             r_status = risk_manager.get_status()
-            lines.append("*📊 Portfolio Risk:*")
+            lines.append("*[STAT] Portfolio Risk:*")
             lines.append(f"• Posições Abertas: {r_status['open_positions']}/{r_status['max_allowed']}")
-            lines.append(f"• Qualidade Dados: {'✅ OK' if r_status['data_quality_ok'] else '❌ INVÁLIDOS'}")
+            lines.append(f"• Qualidade Dados: {'[OK] OK' if r_status['data_quality_ok'] else '[FAIL] INVÁLIDOS'}")
             lines.append("")
         
         lines.append("_Jarvis AI Trading Monitor_")
@@ -950,28 +950,28 @@ class JarvisChatbot:
         
         if not api_key:
             log.warning("CHATBOT_AI", "GROQ_API_KEY not configured")
-            return "🤖 *IA não disponível*\n\nGROQ_API_KEY não configurada.\n\nConfigure a variável de ambiente GROQ_API_KEY no seu .env ou no Railway."
+            return " *IA não disponível*\n\nGROQ_API_KEY não configurada.\n\nConfigure a variável de ambiente GROQ_API_KEY no seu .env ou no Railway."
         
         if not args:
             return (
-                "🤖 *Pergunte-me qualquer coisa!*\n\n"
+                " *Pergunte-me qualquer coisa!*\n\n"
                 "Exemplos:\n"
                 "• BTC vai subir essa semana?\n"
                 "• O que é funding rate?\n"
                 "• Analise SOL para mim\n"
                 "• Devo operar agora?\n\n"
-                "Digite sua pergunta diretamente! 👇"
+                "Digite sua pergunta diretamente! "
             )
         
         try:
             response = await self._call_groq(args, api_key)
             if response:
-                return f"🤖 *Análise IA*\n\n{response}\n\n_Use como referência_"
+                return f" *Análise IA*\n\n{response}\n\n_Use como referência_"
             else:
-                return "🤖 *IA indisponível.* Tente novamente."
+                return " *IA indisponível.* Tente novamente."
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"AI error: {exc}")
-            return f"🤖 *Erro na IA:* {exc}"
+            return f" *Erro na IA:* {exc}"
 
     async def _call_groq(self, question: str, api_key: str) -> Optional[str]:
         ranking = self._system_refs.get("last_ranking")
@@ -1003,7 +1003,7 @@ class JarvisChatbot:
 Pergunta: {question}
 
 Formato: [Emoji] Frase curta. [Emoji] Frase curta.
-Exemplo: 📊 BTC sustentando suporte em 67k. ⚠️ Mas macro ainda incerto."""
+Exemplo: [STAT] BTC sustentando suporte em 67k. [WARN] Mas macro ainda incerto."""
 
         headers = {
             "Authorization": f"Bearer {api_key}",

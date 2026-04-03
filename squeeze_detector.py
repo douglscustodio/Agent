@@ -486,8 +486,8 @@ def format_squeeze_alert(signal: SqueezeSignal) -> str:
     if signal.sinal == SqueezeType.NO_SIGNAL.value:
         return ""
     
-    emoji_dir = "📈" if signal.acao_sugerida == "LONG" else "📉" if signal.acao_sugerida == "SHORT" else "⚪"
-    emoji_conf = "🔥" if signal.confianca == "muito alta" else "⚡" if signal.confianca == "alta" else "💡"
+    emoji_dir = "[UP]" if signal.acao_sugerida == "LONG" else "[DOWN]" if signal.acao_sugerida == "SHORT" else "[NEUTRAL]"
+    emoji_conf = "[HOT]" if signal.confianca == "muito alta" else "" if signal.confianca == "alta" else "[IDEA]"
     
     lines = [
         f"{emoji_dir} *SINAL DE SQUEEZE* {emoji_conf}",

@@ -12,6 +12,10 @@ Isso evita entrar em trades que parecem bons mas são armadilhas.
 NOVO: Detecção de Long Squeeze e Short Squeeze com sinais direcionais:
 - LONG_SQUEEZE_RISK: Funding alto + OI subindo + preço lateral → sinal SHORT
 - SHORT_SQUEEZE_RISK: Funding baixo + OI subindo + preço segurando → sinal LONG
+
+NOVO: Stochastic Oscillator de 4h para scalp com mão pesada:
+- STOCH < 20: Sobrevendido →_LONG_ (mão pesada)
+- STOCH > 80: Sobrecomprado → _SHORT_ (mão pesada)
 """
 
 from dataclasses import dataclass, field
@@ -26,6 +30,11 @@ FUNDING_DANGER_HIGH = 0.01
 FUNDING_WARNING = 0.003
 OI_SPIKE_THRESHOLD = 1.5
 PRICE_NEAR_ATH_THRESHOLD = 0.95
+
+STOCH_PERIOD = 14
+STOCH_OVERBOUGHT = 80.0
+STOCH_OVERSOLD = 20.0
+STOCH_SIGNAL_PERIOD = 3
 
 
 class SqueezeType(str, Enum):
@@ -48,6 +57,12 @@ class ScoreBand(str, Enum):
     SINAL_FORTE = "SINAL_FORTE"
 
 
+class StochasticSignal(str, Enum):
+    OVERSOLD = "SOBREVENDIDO"      # < 20 → LONG
+    OVERBOUGHT = "SOBRECOMPRADO"   # > 80 → SHORT
+    NEUTRAL = "NEUTRO"
+
+
 @dataclass
 class SqueezeResult:
     is_squeeze: bool
@@ -55,6 +70,15 @@ class SqueezeResult:
     danger_level: str
     reasons: list
     recommendation: str
+
+
+@dataclass
+class StochasticResult:
+    k: float
+    d: float
+    signal: StochasticSignal
+    crossover: str
+    divergence: str
 
 
 @dataclass
@@ -72,6 +96,7 @@ class SqueezeSignal:
     wick_confirmed: bool = False
     rsi_divergence: bool = False
     score_band: str = ""
+    stoch_signal: str = ""
     
     def to_dict(self) -> dict:
         return {
@@ -82,6 +107,70 @@ class SqueezeSignal:
             "acao_sugerida": self.acao_sugerida,
             "confianca": self.confianca,
         }
+
+
+def _compute_stochastic(highs: List[float], lows: List[float], closes: List[float], 
+                        period: int = STOCH_PERIOD, signal_period: int = STOCH_SIGNAL_PERIOD) -> StochasticResult:
+    """
+    Computa Stochastic Oscillator.
+    
+    Returns:
+        StochasticResult com %K, %D e sinal
+    """
+    import numpy as np
+    
+    n = len(closes)
+    if n < period:
+        return StochasticResult(k=50.0, d=50.0, signal=StochasticSignal.NEUTRAL, crossover="", divergence="")
+    
+    k_values = []
+    for i in range(period, n + 1):
+        window_high = max(highs[i-period:i])
+        window_low = min(lows[i-period:i])
+        current_close = closes[i-1]
+        
+        if window_high != window_low:
+            k = (current_close - window_low) / (window_high - window_low) * 100
+        else:
+            k = 50.0
+        k_values.append(k)
+    
+    if len(k_values) < signal_period:
+        k = k_values[-1] if k_values else 50.0
+        return StochasticResult(k=k, d=50.0, signal=StochasticSignal.NEUTRAL, crossover="", divergence="")
+    
+    k = k_values[-1]
+    d = np.mean(k_values[-signal_period:]) if len(k_values) >= signal_period else k
+    
+    if k < STOCH_OVERSOLD:
+        signal = StochasticSignal.OVERSOLD
+    elif k > STOCH_OVERBOUGHT:
+        signal = StochasticSignal.OVERBOUGHT
+    else:
+        signal = StochasticSignal.NEUTRAL
+    
+    crossover = ""
+    if len(k_values) >= 2:
+        prev_k = k_values[-2]
+        if prev_k < d and k >= d and k < STOCH_OVERSOLD:
+            crossover = "GOLDEN_CROSS_ATE_BOTTOM"
+        elif prev_k > d and k <= d and k > STOCH_OVERBOUGHT:
+            crossover = "DEATH_CROSS_FROM_TOP"
+        elif prev_k < d and k >= d:
+            crossover = "CROSS_UP"
+        elif prev_k > d and k <= d:
+            crossover = "CROSS_DOWN"
+    
+    divergence = ""
+    if len(closes) >= period * 2:
+        recent_closes = closes[-period:]
+        older_closes = closes[-period*2:-period]
+        if max(recent_closes) > max(older_closes) and k < 50:
+            divergence = "HIDDEN_BULLISH"
+        elif min(recent_closes) < min(older_closes) and k > 50:
+            divergence = "HIDDEN_BEARISH"
+    
+    return StochasticResult(k=k, d=d, signal=signal, crossover=crossover, divergence=divergence)
 
 
 def _compute_rsi(closes: List[float], period: int = 14) -> float:
@@ -183,6 +272,8 @@ def detect_squeeze_signal(
     candles_ohlcv: List[dict] = None,
     recent_low: float = None,
     recent_high: float = None,
+    highs: List[float] = None,
+    lows: List[float] = None,
 ) -> SqueezeSignal:
     """
     Detecta sinais de LONG_SQUEEZE ou SHORT_SQUEEZE.
@@ -198,6 +289,8 @@ def detect_squeeze_signal(
         candles_ohlcv: Lista de candles OHLCV (opcional)
         recent_low: Mínima recente (opcional)
         recent_high: Máxima recente (opcional)
+        highs: Lista de preços máximos (para Stochastic)
+        lows: Lista de preços mínimos (para Stochastic)
     
     Returns:
         SqueezeSignal com análise completa
@@ -206,6 +299,7 @@ def detect_squeeze_signal(
     motivos = []
     squeeze_type = SqueezeType.NO_SIGNAL
     acao_sugerida = "NEUTRO"
+    stoch_signal = ""
     
     has_funding = funding_rate is not None
     has_oi = oi_change_pct is not None
@@ -315,6 +409,36 @@ def detect_squeeze_signal(
         
         acao_sugerida = "LONG"
     
+    if squeeze_type == SqueezeType.NO_SIGNAL and has_closes and highs and lows:
+        stoch_result = _compute_stochastic(highs, lows, closes)
+        stoch_signal = stoch_result.signal.value
+        
+        if stoch_result.signal == StochasticSignal.OVERSOLD:
+            squeeze_type = SqueezeType.SHORT_SQUEEZE
+            score = 50.0
+            motivos.append(f"STOCH {stoch_result.k:.0f} - SOBREVENDIDO")
+            score += 20
+            if stoch_result.crossover == "GOLDEN_CROSS_ATE_BOTTOM":
+                motivos.append("Golden Cross no fundo")
+                score += 15
+            if stoch_result.divergence == "HIDDEN_BULLISH":
+                motivos.append("Divergência oculta bullish")
+                score += 10
+            acao_sugerida = "LONG"
+        
+        elif stoch_result.signal == StochasticSignal.OVERBOUGHT:
+            squeeze_type = SqueezeType.LONG_SQUEEZE
+            score = 50.0
+            motivos.append(f"STOCH {stoch_result.k:.0f} - SOBRECOMPRADO")
+            score += 20
+            if stoch_result.crossover == "DEATH_CROSS_FROM_TOP":
+                motivos.append("Death Cross no topo")
+                score += 15
+            if stoch_result.divergence == "HIDDEN_BEARISH":
+                motivos.append("Divergência oculta bearish")
+                score += 10
+            acao_sugerida = "SHORT"
+    
     score = min(100.0, max(0.0, score))
     
     if score >= 81:
@@ -336,7 +460,7 @@ def detect_squeeze_signal(
     log.info(
         "SQUEEZE_SIGNAL",
         f"{symbol}: tipo={squeeze_type.value} score={score:.0f} acao={acao_sugerida} "
-        f"motivos={len(motivos)} conf={confianca.value}"
+        f"stoch={stoch_signal} motivos={len(motivos)} conf={confianca.value}"
     )
     
     return SqueezeSignal(
@@ -353,6 +477,7 @@ def detect_squeeze_signal(
         wick_confirmed=has_wick,
         rsi_divergence=has_rsi_div,
         score_band=band.value,
+        stoch_signal=stoch_signal,
     )
 
 

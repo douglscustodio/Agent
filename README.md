@@ -1,10 +1,10 @@
-# 🤖 Jarvis AI Trading Monitor
+#  Jarvis AI Trading Monitor
 
 Assistente pessoal de trading com IA que monitora o mercado 24/7, analisa oportunidades e te avisa via Telegram. **Totalmente proativo** - não precisa perguntar, ele te mantém antenado.
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ```bash
 # 1. Clone
@@ -24,7 +24,7 @@ python main.py
 
 ---
 
-## 📱 Comandos Telegram
+##  Comandos Telegram
 
 | Comando | Descrição |
 |---------|-----------|
@@ -41,7 +41,7 @@ python main.py
 
 ---
 
-## ⚡ Sistema Proativo
+##  Sistema Proativo
 
 O Jarvis é **totalmente proativo**. Ele te mantém informado sem você precisar perguntar:
 
@@ -49,19 +49,19 @@ O Jarvis é **totalmente proativo**. Ele te mantém informado sem você precisar
 
 | Alerta | Quando | Descrição |
 |--------|--------|-----------|
-| 📊 **Pulso de Mercado** | A cada 15min | Resumo do mercado: BTC, regime, oportunidades |
-| ⚡ **Mudança de Regime** | Quando detectar | Alerta quando tendência muda |
-| 🚨 **Oportunidades** | A cada scan | Top oportunidades detectadas |
-| 📰 **Notícias Importantes** | Quando detectado | SEC, ETF, hacks, etc |
-| 💥 **BTC Spike** | Quando >3% move | Movimento brusco do BTC |
-| 💸 **Funding Extremo** | Quando >1% | Risco de squeeze detectado |
-| 🚨 **Sinal de Saída** | Quando detectado | Regime mudou contra posição |
-| 📈 **Dashboard Performance** | A cada 4h | Performance do sistema |
-| 🌍 **Sentimento** | A cada 2h | Como está o mercado |
+| [STAT] **Pulso de Mercado** | A cada 15min | Resumo do mercado: BTC, regime, oportunidades |
+|  **Mudança de Regime** | Quando detectar | Alerta quando tendência muda |
+|  **Oportunidades** | A cada scan | Top oportunidades detectadas |
+| [NEWS] **Notícias Importantes** | Quando detectado | SEC, ETF, hacks, etc |
+|  **BTC Spike** | Quando >3% move | Movimento brusco do BTC |
+|  **Funding Extremo** | Quando >1% | Risco de squeeze detectado |
+|  **Sinal de Saída** | Quando detectado | Regime mudou contra posição |
+| [UP] **Dashboard Performance** | A cada 4h | Performance do sistema |
+| [WORLD] **Sentimento** | A cada 2h | Como está o mercado |
 
 ---
 
-## 🎯 Funcionalidades
+## [TARGET] Funcionalidades
 
 - **Análise**: 24+ criptomoedas, funding, OI, volatilidade
 - **IA**: Validação com Groq AI em português
@@ -71,7 +71,7 @@ O Jarvis é **totalmente proativo**. Ele te mantém informado sem você precisar
 
 ---
 
-## ⚙️ Configuração
+##  Configuração
 
 ```env
 # Obrigatório
@@ -100,7 +100,7 @@ DATABASE_URL=sqlite:///jarvis.db
 
 ---
 
-## 🛡️ Sistema de Proteção
+##  Sistema de Proteção
 
 | Camada | Função |
 |--------|--------|
@@ -112,31 +112,31 @@ DATABASE_URL=sqlite:///jarvis.db
 
 ---
 
-## 📊 Fluxo de Alertas
+## [STAT] Fluxo de Alertas
 
 ```
 Scanner (5min)
     ↓
 Detecta oportunidades
     ↓
-┌───────────────────────────────────────┐
-│ SISTEMA PROATIVO ENVIA:              │
-│ • Oportunidades automaticamente       │
-│ • Regime change alerts                │
-│ • Funding extreme warnings            │
-│ • News alerts (SEC, ETF, hacks)      │
-│ • BTC spike alerts                   │
-│ • Exit signal warnings               │
-└───────────────────────────────────────┘
+
+ SISTEMA PROATIVO ENVIA:              
+ • Oportunidades automaticamente       
+ • Regime change alerts                
+ • Funding extreme warnings            
+ • News alerts (SEC, ETF, hacks)      
+ • BTC spike alerts                   
+ • Exit signal warnings               
+
     ↓
 Notificador (Telegram)
     ↓
-Você recebe no celular 📱
+Você recebe no celular 
 ```
 
 ---
 
-## 🚀 Deploy 24/7
+##  Deploy 24/7
 
 ### Railway (Recomendado)
 1. railway.app
@@ -161,47 +161,47 @@ Consulte `DEPLOY.md` para guia completo.
 
 ---
 
-## 📁 Estrutura do Projeto
+##  Estrutura do Projeto
 
 ```
 Agent/
-├── main.py              # Entry point + jobs
-├── chatbot.py           # Interface Telegram
-├── scanner.py           # Scanner de mercado
-├── scoring.py           # Motor de pontuação
-├── notifier.py          # Dispatcher de alertas
-├── proactive_agent.py    # Sistema proativo ⭐
-├── kill_switch.py       # Proteção de drawdown
-├── portfolio_risk.py    # Gestão de risco
-├── squeeze_detector.py  # Detecção de squeeze
-├── ai_analyst.py        # Análise com Groq AI
-├── macro_intelligence.py # Dados macro
-├── news_engine.py       # Agregador de notícias
-├── websocket_client.py  # Preços em tempo real
-├── btc_regime.py       # Detecção de regime
-├── performance_tracker.py # Métricas
-├── adaptive.py          # Aprendizado de pesos
-├── database.py          # Persistência
-├── logger.py           # Logging
-├── scheduler.py         # Orquestrador
-└── requirements.txt    # Dependências
+ main.py              # Entry point + jobs
+ chatbot.py           # Interface Telegram
+ scanner.py           # Scanner de mercado
+ scoring.py           # Motor de pontuação
+ notifier.py          # Dispatcher de alertas
+ proactive_agent.py    # Sistema proativo 
+ kill_switch.py       # Proteção de drawdown
+ portfolio_risk.py    # Gestão de risco
+ squeeze_detector.py  # Detecção de squeeze
+ ai_analyst.py        # Análise com Groq AI
+ macro_intelligence.py # Dados macro
+ news_engine.py       # Agregador de notícias
+ websocket_client.py  # Preços em tempo real
+ btc_regime.py       # Detecção de regime
+ performance_tracker.py # Métricas
+ adaptive.py          # Aprendizado de pesos
+ database.py          # Persistência
+ logger.py           # Logging
+ scheduler.py         # Orquestrador
+ requirements.txt    # Dependências
 ```
 
 ---
 
-## ⚠️ Aviso
+## [WARN] Aviso
 
 Software educacional. Risco de perda total do capital. Não é conselho financeiro.
 
 ---
 
-## 📄 Licença
+##  Licença
 
 MIT License
 
 ---
 
-## 🔗 Links Úteis
+##  Links Úteis
 
 - [GitHub Repository](https://github.com/douglscustodio/Agent)
 - [Hyperliquid](https://hyperliquid.xyz)

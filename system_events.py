@@ -1,144 +1,186 @@
 """
-squeeze_detector.py — Liquidation Squeeze and Crowded Trade Detector
-
-Detecta setups perigosos onde:
-1. Funding extremamente alto (long squeeze esperado)
-2. Open Interest em spike (movimento iminente)
-3. Preço perto de máxima histórica (liquidação de longa)
-4. Correlação com posições populares
-
-Isso evita entrar em trades que parecem bons mas são armadilhas.
+system_events.py — Dual-write system events to stdout (JSON) + DB table
+Every system event is logged to BOTH channels as required by the spec.
 """
 
-from dataclasses import dataclass
-from typing import Dict, Optional
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from logger import get_logger
 
-log = get_logger("squeeze")
+log = get_logger("system_events")
 
-FUNDING_DANGER_HIGH = 0.01
-FUNDING_WARNING = 0.003
-OI_SPIKE_THRESHOLD = 1.5
-PRICE_NEAR_ATH_THRESHOLD = 0.95
 
+# ---------------------------------------------------------------------------
+# Event dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
-class SqueezeResult:
-    is_squeeze: bool
-    is_crowded: bool
-    danger_level: str
-    reasons: list
-    recommendation: str
+class SystemEvent:
+    event_type: str
+    detail: str
+    level: str = "INFO"
+    module: str = "system_events"
+    # Optional schema fields
+    symbol: Optional[str] = None
+    direction: Optional[str] = None
+    score: Optional[float] = None
+    ws_status: Optional[str] = None
+    reconnect_attempt: Optional[int] = None
+    db_status: Optional[str] = None
+    alert_id: Optional[str] = None
+    latency_ms: Optional[float] = None
+    # Auto-set at emit time
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    def optional_kwargs(self) -> dict:
+        """Return only the non-None optional fields as a plain dict."""
+        optional_keys = {
+            "symbol", "direction", "score", "ws_status",
+            "reconnect_attempt", "db_status", "alert_id", "latency_ms",
+        }
+        return {k: v for k, v in asdict(self).items() if k in optional_keys and v is not None}
 
 
-def detect_squeeze(
-    funding_rate: Optional[float],
-    oi_change_pct: Optional[float],
-    current_price: float,
-    ath_price: float,
-    position_direction: str,
-) -> SqueezeResult:
-    """
-    Analisa se o trade está em squeeze/crowded territory.
-    
-    Args:
-        funding_rate: Taxa de funding atual (ex: 0.001 = 0.1%)
-        oi_change_pct: Mudança % no Open Interest
-        current_price: Preço atual do ativo
-        ath_price: Máxima história do ativo
-        position_direction: "LONG" ou "SHORT"
-    
-    Returns:
-        SqueezeResult com análise completa
-    """
-    reasons = []
-    danger_level = "LOW"
-    
-    if funding_rate is None or oi_change_pct is None:
-        return SqueezeResult(
-            is_squeeze=False,
-            is_crowded=False,
-            danger_level="UNKNOWN",
-            reasons=["Dados de funding/OI não disponíveis"],
-            recommendation="CUIDADO - dados incompletos",
-        )
-    
-    if funding_rate >= FUNDING_DANGER_HIGH:
-        reasons.append(f"Funding EXTREMO: {funding_rate*100:.2f}% (armadilha de longa)")
-        danger_level = "HIGH"
-    elif funding_rate >= FUNDING_WARNING:
-        reasons.append(f"Funding ELEVADO: {funding_rate*100:.2f}%")
-        if danger_level != "HIGH":
-            danger_level = "MEDIUM"
-    
-    if oi_change_pct >= OI_SPIKE_THRESHOLD * 100:
-        reasons.append(f"OI em SPIKE: +{oi_change_pct:.0f}% (movimento iminente)")
-        if danger_level == "LOW":
-            danger_level = "MEDIUM"
-    
-    if current_price > 0 and ath_price > 0:
-        ath_ratio = current_price / ath_price
-        if ath_ratio >= PRICE_NEAR_ATH_THRESHOLD:
-            reasons.append(f"Preço perto da ATH: {ath_ratio:.1%} (risco de liquidação)")
-            if danger_level == "LOW":
-                danger_level = "MEDIUM"
-    
-    is_squeeze = danger_level in ("HIGH", "MEDIUM") and funding_rate > 0 and position_direction == "LONG"
-    is_crowded = len(reasons) >= 2
-    
-    if is_squeeze:
-        recommendation = "EVITAR LONG - funding alto = squeeze iminente"
-    elif is_crowded:
-        recommendation = "CUIDADO - múltiplos fatores de risco"
-    elif danger_level == "MEDIUM":
-        recommendation = "Entrada possível mas com stop apertado"
-    else:
-        recommendation = "Setup limpo"
-    
-    log.info(
-        "SQUEEZE_DETECTOR",
-        f"funding={funding_rate*100:.3f}% oi={oi_change_pct:+.0f}% "
-        f"danger={danger_level} squeeze={is_squeeze} crowded={is_crowded}"
-    )
-    
-    return SqueezeResult(
-        is_squeeze=is_squeeze,
-        is_crowded=is_crowded,
-        danger_level=danger_level,
-        reasons=reasons,
-        recommendation=recommendation,
-    )
+# ---------------------------------------------------------------------------
+# Dual-write emitter
+# ---------------------------------------------------------------------------
 
+class SystemEventWriter:
+    """
+    Writes every system event to:
+      1. stdout (JSON via StructuredLogger)
+      2. database table `system_events`
 
-def score_adjustment_for_squeeze(squeeze: SqueezeResult, base_score: float) -> float:
+    Pass a live DB connection/pool at construction, or call set_db() later.
+    The writer degrades gracefully: if the DB is unavailable the stdout log
+    still emits and the DB error itself is logged.
     """
-    Ajusta score do sinal baseado no squeeze.
-    
-    Returns:
-        Score ajustado (pode ser menor ou maior dependendo do setup)
-    """
-    if squeeze.is_squeeze:
-        return base_score - 10  # Penalidade fixa de 10 pontos
-    
-    if squeeze.is_crowded:
-        return base_score - 5   # Penalidade fixa de 5 pontos
-    
-    if squeeze.danger_level == "MEDIUM":
-        return base_score - 3   # Penalidade fixa de 3 pontos
-    
-    return base_score
 
-
-def annotate_squeeze_to_signal(signal_dict: dict, squeeze: SqueezeResult) -> dict:
-    """
-    Adiciona informações de squeeze a um sinal.
-    """
-    signal_dict["squeeze"] = {
-        "is_squeeze": squeeze.is_squeeze,
-        "is_crowded": squeeze.is_crowded,
-        "danger_level": squeeze.danger_level,
-        "reasons": squeeze.reasons,
-        "adjusted_score": score_adjustment_for_squeeze(squeeze, signal_dict.get("score", 0)),
+    _LEVEL_MAP = {
+        "DEBUG":    log.debug,
+        "INFO":     log.info,
+        "WARNING":  log.warning,
+        "ERROR":    log.error,
+        "CRITICAL": log.critical,
     }
-    return signal_dict
+
+    def __init__(self, db_conn=None) -> None:
+        self._db = db_conn
+
+    def set_db(self, db_conn) -> None:
+        self._db = db_conn
+
+    # ------------------------------------------------------------------
+    # Public emit
+    # ------------------------------------------------------------------
+
+    def emit(self, event: SystemEvent) -> None:
+        """Dual-write: stdout JSON + DB row."""
+        self._write_stdout(event)
+        self._write_db(event)
+
+    # Convenience factory methods -------------------------------------------
+
+    def ws_connected(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("WS_CONNECTED", detail, level="INFO", **kw))
+
+    def ws_disconnected(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("WS_DISCONNECTED", detail, level="ERROR", **kw))
+
+    def ws_reconnecting(self, detail: str, attempt: int, **kw) -> None:
+        self.emit(SystemEvent("WS_RECONNECTING", detail, level="WARNING",
+                              reconnect_attempt=attempt, **kw))
+
+    def ws_reconnected(self, detail: str, attempt: int, **kw) -> None:
+        self.emit(SystemEvent("WS_RECONNECTED", detail, level="INFO",
+                              reconnect_attempt=attempt, **kw))
+
+    def ws_dead_stream(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("WS_DEAD_STREAM", detail, level="WARNING", **kw))
+
+    def db_connect_fail(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("DB_CONNECT_FAIL", detail, level="ERROR",
+                              db_status="DOWN", **kw))
+
+    def db_recovered(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("DB_RECOVERED", detail, level="INFO",
+                              db_status="UP", **kw))
+
+    def alert_sent(self, detail: str, alert_id: str, **kw) -> None:
+        self.emit(SystemEvent("ALERT_SENT", detail, level="INFO",
+                              alert_id=alert_id, **kw))
+
+    def alert_suppressed(self, detail: str, alert_id: str, **kw) -> None:
+        self.emit(SystemEvent("ALERT_SUPPRESSED", detail, level="INFO",
+                              alert_id=alert_id, **kw))
+
+    def news_primary_fail(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("NEWS_PRIMARY_FAIL", detail, level="WARNING", **kw))
+
+    def news_fallback_used(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("NEWS_FALLBACK_USED", detail, level="WARNING", **kw))
+
+    def health_check_fail(self, detail: str, **kw) -> None:
+        self.emit(SystemEvent("HEALTH_CHECK_FAIL", detail, level="ERROR", **kw))
+
+    def performance_logged(self, detail: str, latency_ms: float, **kw) -> None:
+        self.emit(SystemEvent("PERFORMANCE_LOGGED", detail, level="INFO",
+                              latency_ms=latency_ms, **kw))
+
+    def system_start(self, detail: str = "service starting", **kw) -> None:
+        self.emit(SystemEvent("SYSTEM_START", detail, level="INFO", **kw))
+
+    def system_ready(self, detail: str = "service ready", **kw) -> None:
+        self.emit(SystemEvent("SYSTEM_READY", detail, level="INFO", **kw))
+
+    # ------------------------------------------------------------------
+    # Private writers
+    # ------------------------------------------------------------------
+
+    def _write_stdout(self, event: SystemEvent) -> None:
+        emit_fn = self._LEVEL_MAP.get(event.level, log.info)
+        emit_fn(event.event_type, event.detail, **event.optional_kwargs())
+
+    def _write_db(self, event: SystemEvent) -> None:
+        if self._db is None:
+            return
+        sql = """
+            INSERT INTO system_events
+                (timestamp, level, module, event_type, detail,
+                 symbol, direction, score, ws_status, reconnect_attempt,
+                 db_status, alert_id, latency_ms)
+            VALUES
+                (%s, %s, %s, %s, %s,
+                 %s, %s, %s, %s, %s,
+                 %s, %s, %s)
+        """
+        values = (
+            event.timestamp,
+            event.level,
+            event.module,
+            event.event_type,
+            event.detail,
+            event.symbol,
+            event.direction,
+            event.score,
+            event.ws_status,
+            event.reconnect_attempt,
+            event.db_status,
+            event.alert_id,
+            event.latency_ms,
+        )
+        try:
+            with self._db.cursor() as cur:
+                cur.execute(sql, values)
+            self._db.commit()
+        except Exception as exc:
+            # Log DB write failure to stdout only (avoid infinite loop)
+            log.error(
+                "DB_WRITE_FAIL",
+                f"failed to persist system event: {exc}",
+                event_type=event.event_type,
+                db_status="DOWN",
+            )

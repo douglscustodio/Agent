@@ -1,656 +1,385 @@
 """
-main.py — Final integrated entry point (Phase 1–4)
-Startup order:
-  1. DB pool + schema
-  2. Performance tracker
-  3. Adaptive engine (restore weights)
-  4. News engine
-  5. Notifier + dedup table
-  6. Health server
-  7. WebSocket client (background)
-  8. APScheduler (all loops)
-  9. Graceful shutdown on SIGINT/SIGTERM
+memory_engine.py — Motor de aprendizado e memória do agente
+O agente aprende:
+  - Quais padrões de score historicamente acertam
+  - Quais setores performam melhor em cada regime de mercado
+  - Quais condições de funding/OI precedem acertos
+  - Quais sinais devem ser ignorados (padrões de falha)
+Persiste tudo no banco de dados.
 """
 
-import asyncio
-import os
-import signal
+import json
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-from adaptive import AdaptiveEngine
-from analyst import get_analyst
-from chatbot import JarvisChatbot
-from macro_intelligence import MacroEngine
-from memory_engine import MemoryEngine
-from btc_regime import RegimeResult
-from config import config
-from database import init_db, close_db, write_system_event, flush_event_buffer
-from data_quality import get_current_quality
-from health_server import run_health_server, app_state
+from database import get_pool, write_system_event
 from logger import get_logger
-from news_engine import NewsEngine, NewsArticle, NewsContext
-from notifier import Notifier
-from performance_tracker import PerformanceTracker
-from portfolio_risk import PortfolioRiskManager
-from ranking import RankingResult
-from kill_switch import KillSwitch
-from proactive_agent import ProactiveAgent
-from scanner import run_scan_cycle, get_symbols
-from scheduler import build_scheduler
-from sector_rotation import compute_sector_rotation
-from websocket_client import run_websocket_client, ws_state
 
-log = get_logger("main")
+log = get_logger("memory_engine")
 
-_state_lock = asyncio.Lock()
+# Memory limits — prevents unbounded RAM growth
+MAX_PATTERN_KEYS   = 500     # max distinct patterns remembered
+MAX_MEMORY_EVENTS  = 1000    # max rows in pattern_log kept in DB
+MAX_SECTOR_KEYS    = 100
 
 # ---------------------------------------------------------------------------
-# Global shared state — all loops read/write this
+# DB Schema
 # ---------------------------------------------------------------------------
 
-class AppContext:
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS agent_memory (
+    id           BIGSERIAL PRIMARY KEY,
+    memory_type  VARCHAR(50)  NOT NULL,
+    key          VARCHAR(200) NOT NULL,
+    value        JSONB        NOT NULL,
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (memory_type, key)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_type ON agent_memory (memory_type);
+CREATE INDEX IF NOT EXISTS idx_memory_key  ON agent_memory (key);
+
+CREATE TABLE IF NOT EXISTS pattern_log (
+    id           BIGSERIAL PRIMARY KEY,
+    symbol       VARCHAR(20)  NOT NULL,
+    direction    VARCHAR(10)  NOT NULL,
+    score        NUMERIC(6,2) NOT NULL,
+    regime       VARCHAR(20),
+    sector       VARCHAR(20),
+    funding_bias VARCHAR(20),
+    oi_trend     VARCHAR(20),
+    macro_risk   NUMERIC(6,2),
+    outcome      VARCHAR(10),
+    pnl_pct      NUMERIC(10,4),
+    horizon_h    INTEGER,
+    logged_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_pattern_outcome ON pattern_log (outcome);
+CREATE INDEX IF NOT EXISTS idx_pattern_sector  ON pattern_log (sector);
+CREATE INDEX IF NOT EXISTS idx_pattern_regime  ON pattern_log (regime);
+"""
+
+
+async def ensure_memory_schema() -> None:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(_SCHEMA_SQL)
+        log.info("DB_RECOVERED", "memory schema verified", db_status="UP")
+    except Exception as exc:
+        log.error("DB_CONNECT_FAIL", f"memory schema error: {exc}", db_status="DOWN")
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PatternMemory:
+    """What the agent has learned about a pattern."""
+    pattern_key:    str
+    total_signals:  int   = 0
+    tp1_count:      int   = 0
+    sl_count:       int   = 0
+    neutral_count:  int   = 0
+    avg_pnl:        float = 0.0
+    win_rate:       float = 0.0
+    should_ignore:  bool  = False    # True if win_rate < 30%
+    confidence:     float = 0.0      # 0-1, based on sample size
+
+    def update(self, outcome: str, pnl: float) -> None:
+        self.total_signals += 1
+        if outcome == "TP1":
+            self.tp1_count += 1
+        elif outcome == "SL":
+            self.sl_count += 1
+        else:
+            self.neutral_count += 1
+
+        # Running average PnL
+        self.avg_pnl = (self.avg_pnl * (self.total_signals - 1) + pnl) / self.total_signals
+        self.win_rate = self.tp1_count / self.total_signals * 100
+        self.confidence = min(self.total_signals / 30, 1.0)   # full confidence at 30+ signals
+        self.should_ignore = self.win_rate < 30 and self.confidence > 0.5
+
+
+@dataclass
+class SectorMemory:
+    """Per-sector performance by BTC regime."""
+    sector:     str
+    regime:     str
+    win_rate:   float = 50.0
+    avg_pnl:    float = 0.0
+    signals:    int   = 0
+    hot:        bool  = False
+
+
+@dataclass
+class AgentInsight:
+    """What the agent knows right now — injected into signals."""
+    pattern_verdict:    str = "SEM DADOS"
+    sector_verdict:     str = "SEM DADOS"
+    similar_past:       str = ""
+    ignore_signal:      bool = False
+    confidence_boost:   float = 0.0   # -10 to +10 score adjustment
+    explanation:        List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# MemoryEngine
+# ---------------------------------------------------------------------------
+
+class MemoryEngine:
     def __init__(self) -> None:
-        self.news_engine:          NewsEngine           = NewsEngine(
-            cryptopanic_token=os.getenv("CRYPTOPANIC_TOKEN")
+        self._patterns:      Dict[str, PatternMemory] = {}
+        self._sector_memory: Dict[str, SectorMemory]  = {}
+
+    async def startup(self) -> None:
+        await ensure_memory_schema()
+        await self._load_from_db()
+        await self._purge_old_patterns()
+        log.info("SYSTEM_READY", f"memory engine ready: {len(self._patterns)} patterns loaded")
+
+    # ------------------------------------------------------------------
+    # Record a new signal outcome (called by performance_tracker)
+    # ------------------------------------------------------------------
+
+    async def record_outcome(
+        self,
+        symbol:      str,
+        direction:   str,
+        score:       float,
+        regime:      str,
+        sector:      str,
+        funding_bias: str,
+        oi_trend:    str,
+        macro_risk:  float,
+        outcome:     str,
+        pnl_pct:     float,
+        horizon_h:   int,
+    ) -> None:
+        """Record signal outcome and update pattern memory."""
+        pattern_key = self._make_pattern_key(regime, sector, direction, score)
+
+        # Update in-memory pattern
+        if pattern_key not in self._patterns:
+            self._patterns[pattern_key] = PatternMemory(pattern_key=pattern_key)
+        self._patterns[pattern_key].update(outcome, pnl_pct)
+
+        # Update sector memory
+        sec_key = f"{sector}:{regime}"
+        if sec_key not in self._sector_memory:
+            self._sector_memory[sec_key] = SectorMemory(sector=sector, regime=regime)
+        sm = self._sector_memory[sec_key]
+        sm.signals += 1
+        sm.avg_pnl  = (sm.avg_pnl * (sm.signals - 1) + pnl_pct) / sm.signals
+        if outcome == "TP1":
+            sm.win_rate = (sm.win_rate * (sm.signals - 1) + 100) / sm.signals
+        else:
+            sm.win_rate = (sm.win_rate * (sm.signals - 1)) / sm.signals
+        sm.hot = sm.win_rate > 60 and sm.signals >= 5
+
+        # Persist to DB
+        await self._persist_pattern(pattern_key, self._patterns[pattern_key])
+        await self._persist_sector(sec_key, sm)
+        await self._log_pattern(
+            symbol, direction, score, regime, sector,
+            funding_bias, oi_trend, macro_risk, outcome, pnl_pct, horizon_h,
         )
-        self.notifier:             Optional[Notifier]   = None
-        self.tracker:              PerformanceTracker   = PerformanceTracker()
-        self.adaptive:             AdaptiveEngine       = AdaptiveEngine()
-        self.macro:                MacroEngine          = MacroEngine()
-        self.memory:               MemoryEngine         = MemoryEngine()
-        self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
-        self.kill_switch:           KillSwitch          = KillSwitch()
-        self.proactive_agent:       Optional[ProactiveAgent] = ProactiveAgent()
 
-        # Live data caches (populated by WS + scan loops)
-        self.latest_articles:      List[NewsArticle]    = []
-        self.latest_ranking:       Optional[RankingResult] = None
-        self.btc_closes:           List[float]          = []
-        self.btc_highs:            List[float]          = []
-        self.btc_lows:             List[float]          = []
-        self.latest_regime:        Optional[RegimeResult]  = None
-        self.last_scan_ts:         Optional[str]        = None
-        self.last_news_ts:         Optional[str]        = None
-        self.last_regime_ts:       Optional[str]        = None
-
-
-ctx = AppContext()
-_chatbot: Optional[JarvisChatbot] = None
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# ---------------------------------------------------------------------------
-# Scheduled job implementations
-# ---------------------------------------------------------------------------
-
-async def job_btc_regime() -> None:
-    """Refresh BTC regime every 2 min from Hyperliquid candles."""
-    from btc_regime import compute_adx
-    from hyperliquid_client import fetch_all_candles
-    candle_map = await fetch_all_candles(["BTC"], interval="15m", count=100)
-    candles    = candle_map.get("BTC", [])
-    if len(candles) < 30:
-        log.debug("BTC_REGIME_UPDATED", "btc_regime: not enough BTC candles")
-        return
-    highs  = [c.high  for c in candles]
-    lows   = [c.low   for c in candles]
-    closes = [c.close for c in candles]
-    regime = compute_adx(highs, lows, closes)
-    
-    ctx.latest_regime  = regime
-    ctx.last_regime_ts = _now_iso()
-    ctx.btc_closes = closes[-20:]
-    ctx.btc_highs = highs[-20:]
-    ctx.btc_lows = lows[-20:]
-    
-    log.info(
-        "BTC_REGIME_UPDATED",
-        f"BTC regime: {regime.regime} ADX={regime.adx:.2f} dir={regime.trend_direction}",
-    )
-
-
-async def job_news_fetch() -> None:
-    """Refresh news + macro in parallel every 3 min."""
-    t0 = time.monotonic()
-    async def _fetch_news():
-        try:
-            return await asyncio.wait_for(ctx.news_engine.fetch_all(), timeout=8.0)
-        except asyncio.TimeoutError:
-            log.warning("NEWS_TIMEOUT", "news fetch timed out — using cache")
-            return ctx.latest_articles or []
-
-    articles, _ = await asyncio.gather(
-        _fetch_news(),
-        ctx.macro.refresh(),
-        return_exceptions=True,
-    )
-    if isinstance(articles, list):
-        ctx.latest_articles = articles
-    ctx.last_news_ts = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_news_ts
-    log.timed("NEWS_FETCH_COMPLETE", f"news+macro parallel: {len(ctx.latest_articles)} articles", t0)
-
-
-async def job_scan_cycle() -> None:
-    """Full scan + ranking + notify every 5 min."""
-    t0 = time.monotonic()
-
-    current_ws_status = ws_state.get("status", "DISCONNECTED")
-    if current_ws_status != "CONNECTED":
-        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan cycle")
-        return
-
-    quality = get_current_quality()
-    if quality.should_block_signals:
-        log.error("SCAN_SKIP", f"Data quality blocked: {quality.quality_label}")
-        return
-
-    if not ctx.kill_switch.can_trade():
-        status = ctx.kill_switch.get_status()
-        log.critical("KILL_SWITCH", f"Trading blocked: {status.reason}")
-        if _chatbot and _chatbot._alert_chat_id:
-            await _chatbot.send_alert(f"🛑 *KILL SWITCH ATIVO*\n\n{status.reason}\n\nTrades bloqueados até reset.")
-        return
-
-    live_weights = ctx.adaptive.get_weights()
-
-    # Compute sector heat scores from latest news
-    # This feeds narrative momentum into per-symbol scores
-    sector_heat_map = ctx.news_engine.get_sector_heat_scores(
-        ctx.latest_articles
-    ) if ctx.latest_articles else {}
-    if sector_heat_map:
-        hot = {k: v for k, v in sector_heat_map.items() if v > 65}
-        cold = {k: v for k, v in sector_heat_map.items() if v < 35}
         log.info(
-            "SCAN_SECTOR_HEAT",
-            f"sector heat: hot={list(hot.keys())} cold={list(cold.keys())}",
+            "MEMORY_UPDATED",
+            f"memory updated: {pattern_key} win_rate={self._patterns[pattern_key].win_rate:.1f}%",
+            symbol=symbol, score=score,
         )
 
-    # Run full scan — weights + sector heat + vol confirm all injected inside
-    try:
-        ranking = await asyncio.wait_for(
-            run_scan_cycle(
-                adaptive_weights=live_weights,
-                sector_heat_map=sector_heat_map,
-            ),
-            timeout=25.0,
-        )
-    except asyncio.TimeoutError:
-        log.error("SCAN_TIMEOUT", "scan cycle timed out after 25s — skipping")
-        return
-    ctx.latest_ranking       = ranking
-    ctx.last_scan_ts         = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_scan_ts
+    # ------------------------------------------------------------------
+    # Get insight for a new signal (called before dispatch)
+    # ------------------------------------------------------------------
 
-    # Build news context map for top signals
-    news_map: Dict[str, Optional[NewsContext]] = {}
-    for sig in ranking.top:
-        news_map[sig.symbol] = ctx.news_engine.get_context_for_symbol(
-            sig.symbol, ctx.latest_articles
-        )
+    def get_insight(
+        self,
+        direction:  str,
+        score:      float,
+        regime:     str,
+        sector:     str,
+        macro_risk: float,
+    ) -> AgentInsight:
+        insight    = AgentInsight()
+        pattern_key= self._make_pattern_key(regime, sector, direction, score)
+        pm         = self._patterns.get(pattern_key)
+        sec_key    = f"{sector}:{regime}"
+        sm         = self._sector_memory.get(sec_key)
 
-    # Sector rotation (for logging/reporting only — heat already applied in scanner)
-    if ranking.top:
-        symbol_scores = {s.symbol: s.score for s in ranking.top}
-        symbol_news   = {s.symbol: (news_map.get(s.symbol) or _empty_news(s.symbol)).impact_score
-                         for s in ranking.top}
-        sector_result = compute_sector_rotation(symbol_scores, symbol_news)
-        log.info(
-            "SCAN_SECTOR_ROTATION",
-            f"sector rotation: hot={sector_result.hot_sectors} cold={sector_result.cold_sectors[:2]}",
-        )
+        # Pattern verdict
+        if pm and pm.confidence > 0.3:
+            if pm.should_ignore:
+                insight.ignore_signal = True
+                insight.pattern_verdict = f"⚠️ Padrão similar falhou {pm.sl_count}x — taxa de acerto só {pm.win_rate:.0f}%"
+                insight.confidence_boost = -10
+                insight.explanation.append(insight.pattern_verdict)
+            elif pm.win_rate > 65:
+                insight.pattern_verdict = f"✅ Padrão similar acertou {pm.tp1_count}x de {pm.total_signals} ({pm.win_rate:.0f}%)"
+                insight.confidence_boost = min(pm.win_rate / 10 - 5, 8)
+                insight.explanation.append(insight.pattern_verdict)
+            else:
+                insight.pattern_verdict = f"➖ Padrão com resultado misto ({pm.win_rate:.0f}% de acerto)"
+                insight.explanation.append(insight.pattern_verdict)
 
-    # Get macro snapshot and memory insights
-    macro_snap = ctx.macro.get_snapshot()
+        # Sector verdict
+        if sm and sm.signals >= 3:
+            if sm.hot:
+                insight.sector_verdict = f"🔥 Setor {sector} quente neste regime ({sm.win_rate:.0f}% acerto)"
+                insight.confidence_boost += 5
+                insight.explanation.append(insight.sector_verdict)
+            elif sm.win_rate < 35:
+                insight.sector_verdict = f"❄️ Setor {sector} frio neste regime ({sm.win_rate:.0f}% acerto)"
+                insight.confidence_boost -= 5
+                insight.explanation.append(insight.sector_verdict)
 
-    # PORTFOLIO RISK: Filter signals through risk manager
-    approved_signals, rejected_signals = ctx.risk_manager.filter_signals(
-        ranking.top, macro_snap
-    )
-    
-    # Update ranking with approved signals only
-    if len(approved_signals) < len(ranking.top):
-        log.warning("SCAN_RISK", f"Risk manager blocked {len(ranking.top) - len(approved_signals)} signals")
-        ranking.top = approved_signals
-        ranking.total_valid = len(approved_signals)
+        # Macro risk adjustment
+        if macro_risk > 75:
+            insight.confidence_boost -= 8
+            insight.explanation.append("⚠️ Risco macro alto — sinal reduzido automaticamente")
+        elif macro_risk < 35:
+            insight.confidence_boost += 3
+            insight.explanation.append("✅ Ambiente macro favorável")
 
-    if not ranking.top:
-        log.info("SCAN_COMPLETE", "No signals after risk filtering")
-        return
+        return insight
 
-    # Dispatch alerts
-    await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)
+    # ------------------------------------------------------------------
+    # Hot sectors in current regime
+    # ------------------------------------------------------------------
 
-    # PROATIVO: Enviar alertas via chatbot se tiver sinais
-    if ranking.top and _chatbot:
-        log.info("CHATBOT_ALERT", f"sending proactive alerts for {len(ranking.top)} signals")
-        for sig in ranking.top[:2]:
-            reason = ""
-            if "relative_strength" in sig.components:
-                reason = f"Força relativa: {sig.components['relative_strength']:.0f}"
-            try:
-                await _chatbot.alert_signal(
-                    symbol=sig.symbol,
-                    direction=sig.direction,
-                    score=sig.score,
-                    reason=reason,
-                )
-            except Exception as exc:
-                log.error("CHATBOT_ALERT", f"failed to send signal alert: {exc}")
+    def get_hot_sectors(self, regime: str) -> List[str]:
+        return [
+            sm.sector for sm in self._sector_memory.values()
+            if sm.regime == regime and sm.hot
+        ]
 
-    # Register sent alerts for performance tracking
-    for sig in ranking.top:
-        price = _get_price(sig.symbol)
-        if price:
-            await ctx.tracker.register_alert(
-                alert_id=f"{sig.symbol}:{sig.direction}:{ctx.last_scan_ts}",
-                symbol=sig.symbol,
-                direction=sig.direction,
-                score=sig.score,
-                entry_price=price,
-                dominant_component=sig.result.dominant_component,   # UPGRADE: feedback loop
-            )
+    def get_ignore_patterns(self) -> List[str]:
+        return [k for k, pm in self._patterns.items() if pm.should_ignore]
 
-    log.timed("SCAN_COMPLETE", f"scan cycle done: {len(ranking.top)} signals", t0)
+    # ------------------------------------------------------------------
+    # DB I/O
+    # ------------------------------------------------------------------
 
-
-async def job_performance_checks() -> None:
-    """Check alert outcomes every hour."""
-    await ctx.tracker.run_checks()
-
-
-async def job_macro_refresh() -> None:
-    """Refresh macro data every 30 min."""
-    await ctx.macro.refresh()
-    snap = ctx.macro.get_snapshot()
-    if snap:
-        high_neg = [e for e in snap.events if e.impact == 'HIGH' and e.sentiment == 'negative']
-        if high_neg and _chatbot:
-            from macro_intelligence import _translate_event_title
-            translated_event = _translate_event_title(high_neg[0].title[:100])
-            await _chatbot.alert_macro_risk(
-                risk_score=snap.risk_score,
-                event=translated_event,
-            )
-
-
-async def job_market_report() -> None:
-    """Send hourly market report to Telegram."""
-    await ctx.notifier.send_market_report()
-
-
-async def job_btc_spike() -> None:
-    """Check BTC for sudden moves every 5 min."""
-    await ctx.notifier.check_btc_spike()
-    if _chatbot and _chatbot._alert_chat_id and ctx.btc_closes and len(ctx.btc_closes) >= 2:
-        btc_price = _get_price("BTC")
-        if btc_price > 0:
-            prev_price = ctx.btc_closes[0]
-            change_pct = ((btc_price - prev_price) / prev_price) * 100
-            if abs(change_pct) >= 3:
-                direction = "SUBIU" if change_pct > 0 else "CAIU"
-                await _chatbot.alert_btc_spike(
-                    direction=direction,
-                    pct=change_pct,
-                    price=btc_price,
-                )
-
-
-async def job_daily_summary() -> None:
-    """Send daily summary at midnight UTC."""
-    await ctx.notifier.send_daily_summary(tracker=ctx.tracker)
-    if _chatbot:
-        _chatbot.reset_daily_alerts()
+    async def _persist_pattern(self, key: str, pm: PatternMemory) -> None:
+        sql = """
+            INSERT INTO agent_memory (memory_type, key, value, updated_at)
+            VALUES ('pattern', $1, $2::jsonb, NOW())
+            ON CONFLICT (memory_type, key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+        """
         try:
-            stats = await ctx.tracker.get_recent_stats(days=1)
-            await _chatbot.alert_daily_summary(stats)
-        except Exception:
-            pass
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(sql, key, json.dumps({
+                    "total": pm.total_signals, "tp1": pm.tp1_count,
+                    "sl": pm.sl_count, "neutral": pm.neutral_count,
+                    "avg_pnl": pm.avg_pnl, "win_rate": pm.win_rate,
+                    "ignore": pm.should_ignore, "confidence": pm.confidence,
+                }))
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"persist pattern failed: {exc}", db_status="DOWN")
 
-
-async def job_adaptive_tune() -> None:
-    """Re-tune scoring weights every 24 hours."""
-    await ctx.adaptive.adapt(ctx.tracker)
-
-
-async def job_analyst_pulse() -> None:
-    """Send analyst market pulse every 15 min."""
-    try:
-        analyst = get_analyst()
-        btc_price = _get_price("BTC") or 0
-        
-        if ctx.latest_regime:
-            context = analyst.analyze_market(
-                btc_price=btc_price,
-                btc_closes=ctx.btc_closes[-20:] if ctx.btc_closes else [],
-                regime_result=ctx.latest_regime,
-                macro_snap=ctx.macro.get_snapshot(),
-            )
-            
-            from analyst import format_market_pulse
-            msg = format_market_pulse(context)
-            
-            if _chatbot and _chatbot._alert_chat_id:
-                await _chatbot.send_alert(msg)
-                log.info("ANALYST", "market pulse sent")
-    except Exception as exc:
-        log.error("ANALYST_ERROR", f"pulse failed: {exc}")
-
-
-async def job_analyst_briefing() -> None:
-    """Send analyst briefing every 4 hours."""
-    try:
-        analyst = get_analyst()
-        btc_price = _get_price("BTC") or 0
-        
-        if ctx.latest_regime:
-            context = analyst.analyze_market(
-                btc_price=btc_price,
-                btc_closes=ctx.btc_closes[-20:] if ctx.btc_closes else [],
-                regime_result=ctx.latest_regime,
-                macro_snap=ctx.macro.get_snapshot(),
-            )
-            
-            from analyst import format_daily_briefing
-            signals = ctx.latest_ranking.top if ctx.latest_ranking else None
-            msg = format_daily_briefing(context, signals)
-            
-            if _chatbot and _chatbot._alert_chat_id:
-                await _chatbot.send_alert(msg)
-                log.info("ANALYST", "briefing sent")
-    except Exception as exc:
-        log.error("ANALYST_ERROR", f"briefing failed: {exc}")
-
-
-async def job_ai_learn_suggest() -> None:
-    """Aprende com trades passados e envia sugestões proativas."""
-    try:
-        from proactive_agent import ProactiveAgent
-        from datetime import datetime as dt
-        
-        proactive = ctx.proactive_agent if hasattr(ctx, 'proactive_agent') else ProactiveAgent()
-        
-        records = await ctx.tracker.get_recent_performance(days=7)
-        
-        if records:
-            await proactive.learn_from_outcomes(records)
-            
-            if proactive.should_suggest_trade() and ctx.latest_ranking and ctx.latest_ranking.top:
-                opportunities = [
-                    {
-                        "symbol": s.symbol,
-                        "direction": s.direction,
-                        "score": s.score,
-                        "band": str(s.band),
-                    }
-                    for s in ctx.latest_ranking.top[:3]
-                ]
-                
-                msg = proactive.format_ai_trade_suggestion({}, opportunities)
-                if msg and _chatbot and _chatbot._alert_chat_id:
-                    await _chatbot.send_alert(msg)
-                    proactive.mark_suggestion_sent()
-                    log.info("PROACTIVE", "AI trade suggestion sent")
-    except Exception as exc:
-        log.error("PROACTIVE_ERROR", f"AI learning suggestion failed: {exc}")
-
-
-async def job_flush_events() -> None:
-    """Flush buffered DB events every 15 seconds."""
-    await flush_event_buffer()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _patch_scoring_weights(weights: Dict[str, float]) -> None:
-    """Inject live weights into the scoring module's global WEIGHTS dict."""
-    try:
-        import scoring
-        for k, v in weights.items():
-            if k in scoring.WEIGHTS:
-                scoring.WEIGHTS[k] = v
-    except Exception as exc:
-        log.error("WEIGHT_UPDATE_FAIL", f"weight patch failed: {exc}")
-
-
-def _get_price(symbol: str) -> Optional[float]:
-    try:
-        from websocket_client import ws_price_cache
-        return ws_price_cache.get(symbol)
-    except Exception:
-        return None
-
-
-def _empty_news(symbol: str):
-    from news_engine import NewsContext
-    return NewsContext(
-        symbol=symbol,
-        articles=[],
-        aggregate_sentiment="neutral",
-        impact_score=0.0,
-        top_headline="No news",
-        freshness_minutes=999.0,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Graceful shutdown
-# ---------------------------------------------------------------------------
-
-_shutdown_event = asyncio.Event()
-
-
-def _handle_signal(sig) -> None:
-    log.warning("SYSTEM_START", f"received {sig.name} — shutting down")
-    _shutdown_event.set()
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-async def main() -> None:
-    log.info("SYSTEM_START", "=== Jarvis AI Trading Monitor iniciando ===")
-    ai_key = bool(os.getenv("GROQ_API_KEY"))
-    ai_status = "habilitada" if ai_key else "desabilitada — configure GROQ_API_KEY"
-    log.info("SYSTEM_START", f"IA Groq: {ai_status}")
-    app_state["started_at"] = _now_iso()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _handle_signal, sig)
-
-    # ── 1. Database ──────────────────────────────────────────────────────
-    try:
-        await init_db()
-    except RuntimeError as exc:
-        log.critical("SYSTEM_START", f"DB startup failed: {exc}")
-        return
-
-    # ── 2. Performance tracker ───────────────────────────────────────────
-    await ctx.tracker.startup()
-
-    # ── 3. Adaptive engine ───────────────────────────────────────────────
-    await ctx.adaptive.startup()
-    await ctx.memory.startup()
-    await ctx.macro.refresh()
-
-    # ── 4. News engine (warm cache) ──────────────────────────────────────
-    try:
-        ctx.latest_articles = await ctx.news_engine.fetch_all()
-        ctx.last_news_ts    = _now_iso()
-        log.info("SYSTEM_READY", f"news cache warm: {len(ctx.latest_articles)} articles")
-    except Exception as exc:
-        log.warning("NEWS_PRIMARY_FAIL", f"initial news fetch failed: {exc}")
-
-    # ── 5. Notifier ──────────────────────────────────────────────────────
-    tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not tg_token:
-        log.warning("SYSTEM_START", "TELEGRAM_BOT_TOKEN não configurada — alertas Telegram desabilitados")
-    if not tg_chat_id:
-        log.warning("SYSTEM_START", "TELEGRAM_CHAT_ID não configurada — alertas Telegram desabilitados")
-    log.info("SYSTEM_START", f"Telegram config — token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
-    ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
-    await ctx.notifier.startup()
-    ctx.notifier.set_news_engine(ctx.news_engine)
-    await ctx.notifier.send_system_alert(
-        "🟢 *Crypto Monitor online*\nAll subsystems initialised. Scanner active."
-    )
-    log.info("SYSTEM_READY", "startup Telegram alert dispatched")
-
-    # ── 6. Health server ─────────────────────────────────────────────────
-    await run_health_server()
-
-    # ── 7. WebSocket client ──────────────────────────────────────────────
-    ws_task = asyncio.create_task(run_websocket_client())
-
-    # ── 8. Scheduler ─────────────────────────────────────────────────────
-    sched = build_scheduler(
-        scan_fn=        job_scan_cycle,
-        news_fn=        job_news_fetch,
-        regime_fn=      job_btc_regime,
-        performance_fn= job_performance_checks,
-        adaptive_fn=    job_adaptive_tune,
-        market_report_fn= job_market_report,
-        macro_refresh_fn= job_macro_refresh,
-        btc_spike_fn=   job_btc_spike,
-        daily_summary_fn= job_daily_summary,
-        flush_fn=       job_flush_events,          # UPGRADE: batch DB writes
-        ai_learn_fn=    job_ai_learn_suggest,     # UPGRADE: AI learning + suggestions
-    )
-    sched.start()
-    
-    # REMOVIDO: Jobs repetitivos - muito frequentes e repetitivos
-    # sched.add_interval_job(job_analyst_pulse, minutes=15, name="analyst_pulse", jitter=30)
-    # sched.add_interval_job(job_analyst_briefing, minutes=0, name="analyst_briefing", hours=4, jitter=300)
-
-    await write_system_event(
-        "SYSTEM_READY",
-        "all subsystems running — scheduler active",
-        level="INFO", module="main",
-    )
-    log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
-
-    # ── 9. Chatbot (Telegram) ───────────────────────────────────────────
-    global _chatbot
-    _chatbot = None
-    if tg_token and tg_chat_id:
-        _chatbot = JarvisChatbot(tg_token)
-        _chatbot.set_alert_chat_id(tg_chat_id)
-        _chatbot.set_system_refs(
-            scanner_module=run_scan_cycle,
-            news_engine=ctx.news_engine,
-            macro_engine=ctx.macro,
-            tracker=ctx.tracker,
-            risk_manager=ctx.risk_manager,
-            kill_switch=ctx.kill_switch,
-            last_ranking=ctx.latest_ranking,
-        )
-        log.info("CHATBOT_READY", f"chatbot init - token={bool(tg_token)} chat_id={bool(tg_chat_id)}")
-        
-        await asyncio.sleep(2)
-        welcome = await _chatbot.handle_message("/start", tg_chat_id)
-        log.info("CHATBOT_WELCOME", f"sending welcome: {len(welcome)} chars")
-        sent = await _chatbot._send_message(tg_chat_id, welcome)
-        log.info("CHATBOT_INIT", f"welcome sent: {sent}")
-
-    # ── 10. Message handling loop ────────────────────────────────────────
-    async def chat_loop():
-        if not _chatbot:
-            log.warning("CHATBOT_LOOP", "no chatbot configured")
-            return
-        log.info("CHATBOT_LOOP", "chat loop started - waiting for messages")
-        poll_count = 0
-        while not _shutdown_event.is_set():
-            try:
-                poll_count += 1
-                if poll_count % 10 == 0:
-                    log.debug("CHATBOT_POLL", f"still polling... count={poll_count}")
-                
-                result = await asyncio.wait_for(_chatbot.poll(), timeout=35)
-                
-                if result is None:
-                    continue
-                
-                text = result.get("text", "")
-                user_chat_id = result.get("chat_id", "")
-                non_text = result.get("non_text", False)
-                
-                if not user_chat_id:
-                    log.warning("CHATBOT_MSG", "no chat_id in result")
-                    continue
-                
-                log.info("CHATBOT_MSG", f"user={user_chat_id} text='{text[:30]}...' non_text={non_text}")
-                
-                if non_text:
-                    response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver comandos."
-                else:
-                    from scanner import run_scan_cycle as _scan
-                    ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
-                    _chatbot.set_system_refs(last_ranking=ctx.latest_ranking)
-                    response = await _chatbot.handle_message(text, user_chat_id)
-                
-                if response:
-                    sent = await _chatbot._send_message(user_chat_id, response)
-                    log.info("CHATBOT_RESPONSE", f"sent={sent} to {user_chat_id}")
-                    
-            except asyncio.TimeoutError:
-                log.debug("CHATBOT_POLL", "timeout - no messages, continuing")
-            except Exception as exc:
-                log.error("CHATBOT_ERROR", f"error: {exc}")
-                await asyncio.sleep(5)
-
-    chat_task = asyncio.create_task(chat_loop()) if _chatbot else None
-
-    # ── 11. Run until signal ─────────────────────────────────────────────
-    await _shutdown_event.wait()
-
-    # ── 10. Graceful teardown ────────────────────────────────────────────
-    log.info("SYSTEM_START", "initiating graceful shutdown")
-
-    await ctx.notifier.send_system_alert("🔴 *Crypto Monitor offline*\nShutting down.")
-
-  
-
-    ws_task.cancel()
-    try:
-        await ws_task
-    except asyncio.CancelledError:
-        pass
-
-    if chat_task:
-        chat_task.cancel()
+    async def _persist_sector(self, key: str, sm: SectorMemory) -> None:
+        sql = """
+            INSERT INTO agent_memory (memory_type, key, value, updated_at)
+            VALUES ('sector', $1, $2::jsonb, NOW())
+            ON CONFLICT (memory_type, key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+        """
         try:
-            await chat_task
-        except asyncio.CancelledError:
-            pass
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(sql, key, json.dumps({
+                    "sector": sm.sector, "regime": sm.regime,
+                    "win_rate": sm.win_rate, "avg_pnl": sm.avg_pnl,
+                    "signals": sm.signals, "hot": sm.hot,
+                }))
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"persist sector failed: {exc}", db_status="DOWN")
 
-    await close_db()
+    async def _log_pattern(self, symbol, direction, score, regime, sector,
+                           funding_bias, oi_trend, macro_risk, outcome, pnl_pct, horizon_h) -> None:
+        sql = """
+            INSERT INTO pattern_log
+                (symbol, direction, score, regime, sector, funding_bias,
+                 oi_trend, macro_risk, outcome, pnl_pct, horizon_h)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        """
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(sql, symbol, direction, score, regime, sector,
+                                   funding_bias, oi_trend, macro_risk, outcome, pnl_pct, horizon_h)
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"log pattern failed: {exc}", db_status="DOWN")
 
-    await write_system_event(
-        "SYSTEM_START", "shutdown complete",
-        level="INFO", module="main",
-    )
-    log.info("SYSTEM_START", "=== shutdown complete ===")
+    async def _purge_old_patterns(self) -> None:
+        """Remove oldest pattern_log rows and trim in-memory dicts."""
+        # Trim in-memory dicts
+        if len(self._patterns) > MAX_PATTERN_KEYS:
+            # Remove lowest confidence patterns first
+            sorted_keys = sorted(self._patterns, key=lambda k: self._patterns[k].confidence)
+            for k in sorted_keys[:len(self._patterns) - MAX_PATTERN_KEYS]:
+                del self._patterns[k]
+            log.info("MEMORY_PURGE", f"trimmed patterns to {len(self._patterns)}")
 
+        if len(self._sector_memory) > MAX_SECTOR_KEYS:
+            sorted_keys = sorted(self._sector_memory, key=lambda k: self._sector_memory[k].signals)
+            for k in sorted_keys[:len(self._sector_memory) - MAX_SECTOR_KEYS]:
+                del self._sector_memory[k]
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+        # Trim DB pattern_log
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"""DELETE FROM pattern_log WHERE id NOT IN (
+                        SELECT id FROM pattern_log ORDER BY logged_at DESC LIMIT {MAX_MEMORY_EVENTS}
+                    )"""
+                )
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"purge pattern_log failed: {exc}", db_status="DOWN")
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    async def _load_from_db(self) -> None:
+        sql = "SELECT memory_type, key, value FROM agent_memory"
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(sql)
+            for row in rows:
+                val = json.loads(row["value"])
+                if row["memory_type"] == "pattern":
+                    pm = PatternMemory(
+                        pattern_key=row["key"],
+                        total_signals=val.get("total", 0),
+                        tp1_count=val.get("tp1", 0),
+                        sl_count=val.get("sl", 0),
+                        neutral_count=val.get("neutral", 0),
+                        avg_pnl=val.get("avg_pnl", 0.0),
+                        win_rate=val.get("win_rate", 0.0),
+                        should_ignore=val.get("ignore", False),
+                        confidence=val.get("confidence", 0.0),
+                    )
+                    self._patterns[row["key"]] = pm
+                elif row["memory_type"] == "sector":
+                    sm = SectorMemory(
+                        sector=val.get("sector", ""),
+                        regime=val.get("regime", ""),
+                        win_rate=val.get("win_rate", 50.0),
+                        avg_pnl=val.get("avg_pnl", 0.0),
+                        signals=val.get("signals", 0),
+                        hot=val.get("hot", False),
+                    )
+                    self._sector_memory[row["key"]] = sm
+        except Exception as exc:
+            log.warning("MEMORY_LOAD_FAIL", f"memory load failed: {exc}")
+
+    @staticmethod
+    def _make_pattern_key(regime: str, sector: str, direction: str, score: float) -> str:
+        score_bucket = "HIGH" if score >= 85 else ("MED" if score >= 75 else "LOW")
+        return f"{regime}:{sector}:{direction}:{score_bucket}"

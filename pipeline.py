@@ -1,436 +1,231 @@
 """
-performance_tracker.py — Alert outcome tracking
-Checks price at 1h / 4h / 24h after alert and classifies: TP1 / SL / NEUTRAL
-Persists all results to DB table `performance_log`
+pipeline.py — Pipeline de Dados do Jarvis
+
+PIPELINE:
+RAW DATA → CLEAN → VALIDATE → FEATURE → ANALYZE → DECIDE
+
+Cada etapa:
+1. RAW DATA: Dados crus das APIs
+2. CLEAN: Limpa e formata
+3. VALIDATE: Valida qualidade
+4. FEATURE: Extrai features
+5. ANALYZE: Roda análises
+6. DECIDE: Toma decisões
 """
 
-import asyncio
-import time
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
+import time
 
-from database import get_pool, write_system_event
 from logger import get_logger
 
-log = get_logger("performance_tracker")
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-TP1_PCT  = 0.03    # +3% = TP1 hit
-SL_PCT   = 0.02    # -2% = SL hit
-CHECK_INTERVALS_H = [1, 4, 24]
-
-# ---------------------------------------------------------------------------
-# Enums / dataclasses
-# ---------------------------------------------------------------------------
-
-class Outcome(str, Enum):
-    TP1     = "TP1"
-    SL      = "SL"
-    NEUTRAL = "NEUTRAL"
-    PENDING = "PENDING"
+log = get_logger("pipeline")
 
 
 @dataclass
-class PendingAlert:
-    alert_id:     str
-    symbol:       str
-    direction:    str
-    score:        float
-    entry_price:  float
-    alerted_at:   float       # unix epoch
-    checked_1h:   bool = False
-    checked_4h:   bool = False
-    checked_24h:  bool = False
-    final_outcome: Optional[Outcome] = None
-    dominant_component: str = ""    # UPGRADE: component that drove this signal
-
-
-@dataclass
-class PerformanceRecord:
-    alert_id:       str
-    symbol:         str
-    direction:      str
-    score:          float
-    entry_price:    float
-    check_price:    float
-    pnl_pct:        float
-    outcome:        Outcome
-    horizon_h:      int
-    alerted_at:     float
-    checked_at:     float
-    dominant_component: str = ""    # UPGRADE: for component win-rate feedback
-
-
-# ---------------------------------------------------------------------------
-# DB schema
-# ---------------------------------------------------------------------------
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS performance_log (
-    id              BIGSERIAL PRIMARY KEY,
-    alert_id        VARCHAR(120) NOT NULL,
-    symbol          VARCHAR(20)  NOT NULL,
-    direction       VARCHAR(10)  NOT NULL,
-    score           NUMERIC(6,2) NOT NULL,
-    entry_price     NUMERIC(20,8) NOT NULL,
-    check_price     NUMERIC(20,8) NOT NULL,
-    pnl_pct         NUMERIC(10,4) NOT NULL,
-    outcome         VARCHAR(10)  NOT NULL,
-    horizon_h       INTEGER      NOT NULL,
-    alerted_at      TIMESTAMPTZ  NOT NULL,
-    checked_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    dominant_component VARCHAR(40)  DEFAULT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_perf_symbol    ON performance_log (symbol);
-CREATE INDEX IF NOT EXISTS idx_perf_outcome   ON performance_log (outcome);
-CREATE INDEX IF NOT EXISTS idx_perf_alerted   ON performance_log (alerted_at DESC);
-ALTER TABLE performance_log ADD COLUMN IF NOT EXISTS dominant_component VARCHAR(40) DEFAULT NULL;
-CREATE INDEX IF NOT EXISTS idx_perf_component ON performance_log (dominant_component);
-CREATE INDEX IF NOT EXISTS idx_perf_alert_id  ON performance_log (alert_id);
-"""
-
-
-async def ensure_performance_schema() -> None:
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(_SCHEMA_SQL)
-        log.info("DB_RECOVERED", "performance_log table verified", db_status="UP")
-    except Exception as exc:
-        log.error("DB_CONNECT_FAIL", f"performance schema error: {exc}", db_status="DOWN")
-
-
-# ---------------------------------------------------------------------------
-# Price provider stub
-# ---------------------------------------------------------------------------
-
-async def get_current_price(symbol: str) -> Optional[float]:
-    """
-    Fetch current mid-price for symbol.
-    Phase 4: reads from ws_state price cache populated by websocket_client.
-    Returns None if unavailable.
-    """
-    try:
-        from websocket_client import ws_price_cache
-        return ws_price_cache.get(symbol)
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Outcome classifier
-# ---------------------------------------------------------------------------
-
-def classify_outcome(
-    entry_price: float,
-    check_price: float,
-    direction:   str,
-) -> Tuple[Outcome, float]:
-    if entry_price <= 0:
-        return Outcome.NEUTRAL, 0.0
-
-    if direction.upper() == "LONG":
-        pnl_pct = (check_price - entry_price) / entry_price
-    else:
-        pnl_pct = (entry_price - check_price) / entry_price
-
-    if pnl_pct >= TP1_PCT:
-        return Outcome.TP1, pnl_pct
-    elif pnl_pct <= -SL_PCT:
-        return Outcome.SL, pnl_pct
-    else:
-        return Outcome.NEUTRAL, pnl_pct
-
-
-# ---------------------------------------------------------------------------
-# PerformanceTracker
-# ---------------------------------------------------------------------------
-
-class PerformanceTracker:
-    def __init__(self) -> None:
-        self._pending: Dict[str, PendingAlert] = {}   # alert_id → PendingAlert
-
-    async def startup(self) -> None:
-        await ensure_performance_schema()
-        log.info("SYSTEM_READY", "performance tracker ready")
-
-    # ------------------------------------------------------------------
-    # Register new alert
-    # ------------------------------------------------------------------
-
-    async def register_alert(
-        self,
-        alert_id:    str,
-        symbol:      str,
-        direction:   str,
-        score:       float,
-        entry_price: float,
-        dominant_component: str = "",   # UPGRADE: for feedback loop
-    ) -> None:
-        pending = PendingAlert(
-            alert_id=alert_id,
-            symbol=symbol,
-            direction=direction,
-            score=score,
-            entry_price=entry_price,
-            alerted_at=time.time(),
-            dominant_component=dominant_component,
-        )
-        self._pending[alert_id] = pending
-        await self._persist_pending(pending)
-
-        log.info(
-            "PERFORMANCE_LOGGED",
-            f"registered alert for tracking: {symbol} {direction} entry={entry_price:.4f}",
-            symbol=symbol,
-            direction=direction,
-            score=score,
-            alert_id=alert_id,
-        )
-
-    # ------------------------------------------------------------------
-    # Scheduled check — called every hour by scheduler
-    # ------------------------------------------------------------------
-
-    async def run_checks(self) -> None:
-        """Evaluate all pending alerts against their time horizons."""
-        if not self._pending:
-            return
-
-        now = time.time()
-        completed = []
-
-        for alert_id, pending in self._pending.items():
-            elapsed_h = (now - pending.alerted_at) / 3600
-
-            checks_due = []
-            if elapsed_h >= 1  and not pending.checked_1h:  checks_due.append(1)
-            if elapsed_h >= 4  and not pending.checked_4h:  checks_due.append(4)
-            if elapsed_h >= 24 and not pending.checked_24h: checks_due.append(24)
-
-            for horizon in checks_due:
-                current_price = await get_current_price(pending.symbol)
-                if current_price is None:
-                    log.warning(
-                        "PERFORMANCE_LOGGED",
-                        f"no price for {pending.symbol} at {horizon}h check",
-                        symbol=pending.symbol, alert_id=alert_id,
-                    )
-                    continue
-
-                outcome, pnl_pct = classify_outcome(
-                    pending.entry_price, current_price, pending.direction
-                )
-
-                record = PerformanceRecord(
-                    alert_id=alert_id,
-                    symbol=pending.symbol,
-                    direction=pending.direction,
-                    score=pending.score,
-                    entry_price=pending.entry_price,
-                    check_price=current_price,
-                    pnl_pct=round(pnl_pct * 100, 4),
-                    outcome=outcome,
-                    horizon_h=horizon,
-                    alerted_at=pending.alerted_at,
-                    checked_at=time.time(),
-                )
-                await self._persist_record(record)
-
-                outcome_emoji = "✅" if outcome == Outcome.TP1 else ("❌" if outcome == Outcome.SL else "➖")
-                log.info(
-                    "PERFORMANCE_LOGGED",
-                    f"{outcome_emoji} {pending.symbol} {pending.direction} "
-                    f"{horizon}h: {outcome} pnl={pnl_pct*100:.2f}%",
-                    symbol=pending.symbol,
-                    direction=pending.direction,
-                    score=pending.score,
-                    latency_ms=horizon * 3600 * 1000,
-                    alert_id=alert_id,
-                )
-                await write_system_event(
-                    "PERFORMANCE_LOGGED",
-                    f"{pending.symbol} {pending.direction} {horizon}h outcome: {outcome} ({pnl_pct*100:.2f}%)",
-                    level="INFO", module="performance_tracker",
-                    symbol=pending.symbol, direction=pending.direction,
-                    score=pending.score, alert_id=alert_id,
-                )
-
-                # Mark horizon checked
-                if horizon == 1:  pending.checked_1h  = True
-                if horizon == 4:  pending.checked_4h  = True
-                if horizon == 24: pending.checked_24h = True
-                if outcome in (Outcome.TP1, Outcome.SL):
-                    pending.final_outcome = outcome
-
-            # Remove fully evaluated alerts
-            if pending.checked_24h:
-                completed.append(alert_id)
-
-        for aid in completed:
-            self._pending.pop(aid, None)
-
-    # ------------------------------------------------------------------
-    # Performance stats for adaptive module
-    # ------------------------------------------------------------------
-
-    async def get_recent_stats(self, days: int = 7) -> dict:
-        """
-        Return win/loss stats over recent days for adaptive weight tuning.
-        """
-        cutoff_ts = time.time() - days * 86400
-        cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
-
-        sql = """
-            SELECT
-                outcome,
-                COUNT(*)          AS count,
-                AVG(pnl_pct)      AS avg_pnl,
-                AVG(score)        AS avg_score,
-                horizon_h
-            FROM performance_log
-            WHERE alerted_at >= $1
-            GROUP BY outcome, horizon_h
-            ORDER BY horizon_h, outcome
-        """
-        stats = {"tp1": 0, "sl": 0, "neutral": 0, "avg_pnl": 0.0, "win_rate": 0.0}
-        try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(sql, cutoff_dt)
-            total = 0
-            pnl_sum = 0.0
-            for row in rows:
-                if row["outcome"] == Outcome.TP1:
-                    stats["tp1"] += row["count"]
-                elif row["outcome"] == Outcome.SL:
-                    stats["sl"]  += row["count"]
-                else:
-                    stats["neutral"] += row["count"]
-                total   += row["count"]
-                pnl_sum += float(row["avg_pnl"] or 0) * row["count"]
-
-            if total > 0:
-                stats["avg_pnl"]  = round(pnl_sum / total, 4)
-                stats["win_rate"] = round(stats["tp1"] / total * 100, 2)
-            stats["total"] = total
-        except Exception as exc:
-            log.error("DB_CONNECT_FAIL", f"get_recent_stats failed: {exc}", db_status="DOWN")
-        return stats
-
-    # ------------------------------------------------------------------
-    # Component-level stats for adaptive tuning
-    # ------------------------------------------------------------------
-
-    async def get_component_correlation(self) -> dict:
-        """
-        Compute correlation between each score component and TP1 outcome.
-        Returns dict of component → correlation coefficient proxy.
-        Phase 4: simplified — returns avg score of TP1 vs SL alerts.
-        """
-        sql = """
-            SELECT outcome, AVG(score) as avg_score, COUNT(*) as n
-            FROM performance_log
-            WHERE horizon_h = 24
-            GROUP BY outcome
-        """
-        result = {}
-        try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(sql)
-            for row in rows:
-                result[row["outcome"]] = {
-                    "avg_score": float(row["avg_score"] or 0),
-                    "count": int(row["n"]),
-                }
-        except Exception as exc:
-            log.error("DB_CONNECT_FAIL", f"get_component_correlation failed: {exc}", db_status="DOWN")
-        return result
+class DataQuality:
+    """Qualidade dos dados."""
+    is_valid: bool
+    age_seconds: float
+    source: str
+    issues: List[str]
     
-    async def get_recent_performance(self, days: int = 7) -> List[dict]:
-        """
-        Retorna registros de performance para o sistema de aprendizado.
-        Usado pelo proactive_agent para aprender padrões.
-        """
-        cutoff_ts = time.time() - days * 86400
-        cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
-        
-        sql = """
-            SELECT 
-                symbol, direction, score, outcome, 
-                EXTRACT(HOUR FROM alerted_at) as hour,
-                alerted_at
-            FROM performance_log
-            WHERE alerted_at >= $1 AND outcome != 'PENDING'
-            ORDER BY alerted_at DESC
-        """
-        
-        records = []
-        try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(sql, cutoff_dt)
-            for row in rows:
-                records.append({
-                    "symbol": row["symbol"],
-                    "direction": row["direction"],
-                    "score": float(row["score"]),
-                    "outcome": row["outcome"],
-                    "hour": int(row["hour"]) if row["hour"] else 12,
-                })
-        except Exception as exc:
-            log.error("DB_CONNECT_FAIL", f"get_recent_performance failed: {exc}", db_status="DOWN")
-        
-        return records
+    def should_block(self) -> bool:
+        return not self.is_valid or self.age_seconds > 300  # 5 min
 
-    # ------------------------------------------------------------------
-    # DB persistence
-    # ------------------------------------------------------------------
 
-    async def _persist_pending(self, p: PendingAlert) -> None:
-        sql = """
-            INSERT INTO performance_log
-                (alert_id, symbol, direction, score, entry_price,
-                 check_price, pnl_pct, outcome, horizon_h, alerted_at, checked_at,
-                 dominant_component)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-            ON CONFLICT DO NOTHING
-        """
-        alerted_dt = datetime.fromtimestamp(p.alerted_at, tz=timezone.utc)
+class PipelineStage:
+    """Uma etapa do pipeline."""
+    
+    def __init__(self, name: str, processor: Callable):
+        self.name = name
+        self.processor = processor
+        self.execution_count = 0
+        self.error_count = 0
+        self.last_execution = 0.0
+    
+    async def execute(self, data: Any) -> Any:
+        self.execution_count += 1
+        self.last_execution = time.time()
+        
         try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    sql, p.alert_id, p.symbol, p.direction, p.score,
-                    p.entry_price, 0.0, 0.0, Outcome.PENDING.value, 0,
-                    alerted_dt, alerted_dt, p.dominant_component or None,
-                )
+            result = await self.processor(data)
+            log.debug("PIPELINE_STAGE", f"{self.name}: OK")
+            return result
         except Exception as exc:
-            log.error("DB_CONNECT_FAIL", f"persist_pending failed: {exc}", db_status="DOWN")
+            self.error_count += 1
+            log.error("PIPELINE_STAGE", f"{self.name}: ERROR - {exc}")
+            raise
 
-    async def _persist_record(self, r: PerformanceRecord) -> None:
-        sql = """
-            INSERT INTO performance_log
-                (alert_id, symbol, direction, score, entry_price,
-                 check_price, pnl_pct, outcome, horizon_h, alerted_at, checked_at,
-                 dominant_component)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        """
-        alerted_dt = datetime.fromtimestamp(r.alerted_at, tz=timezone.utc)
-        checked_dt = datetime.fromtimestamp(r.checked_at, tz=timezone.utc)
-        try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    sql, r.alert_id, r.symbol, r.direction, r.score,
-                    r.entry_price, r.check_price, r.pnl_pct, r.outcome.value,
-                    r.horizon_h, alerted_dt, checked_dt, r.dominant_component or None,
-                )
-        except Exception as exc:
-            log.error("DB_CONNECT_FAIL", f"persist_record failed: {exc}", db_status="DOWN")
+
+class DataPipeline:
+    """
+    Pipeline de processamento de dados.
+    
+    Executa etapas em sequência:
+    1. fetch_raw()
+    2. clean()
+    3. validate()
+    4. extract_features()
+    5. analyze()
+    6. decide()
+    """
+    
+    def __init__(self):
+        self.stages: List[PipelineStage] = []
+        self._data_cache: Dict[str, Any] = {}
+        self._last_pipeline_time = 0.0
+    
+    def add_stage(self, name: str, processor: Callable) -> None:
+        """Adiciona uma etapa ao pipeline."""
+        stage = PipelineStage(name, processor)
+        self.stages.append(stage)
+        log.info("PIPELINE", f"Stage added: {name} (total: {len(self.stages)})")
+    
+    async def execute(self, initial_data: Any = None) -> Any:
+        """Executa todo o pipeline."""
+        pipeline_start = time.time()
+        current_data = initial_data
+        
+        for stage in self.stages:
+            try:
+                current_data = await stage.execute(current_data)
+            except Exception as exc:
+                log.error("PIPELINE", f"Stage {stage.name} failed: {exc}")
+                return None
+        
+        self._last_pipeline_time = time.time() - pipeline_start
+        
+        log.info(
+            "PIPELINE",
+            f"Pipeline complete in {self._last_pipeline_time*1000:.0f}ms",
+            stages=len(self.stages),
+            errors=sum(s.error_count for s in self.stages)
+        )
+        
+        return current_data
+    
+    def get_cache(self, key: str) -> Optional[Any]:
+        return self._data_cache.get(key)
+    
+    def set_cache(self, key: str, value: Any) -> None:
+        self._data_cache[key] = value
+    
+    def clear_cache(self) -> None:
+        self._data_cache.clear()
+    
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            "stages": len(self.stages),
+            "total_time_ms": self._last_pipeline_time * 1000,
+            "cache_size": len(self._data_cache),
+            "stage_stats": [
+                {
+                    "name": s.name,
+                    "executions": s.execution_count,
+                    "errors": s.error_count,
+                    "last_execution": datetime.fromtimestamp(s.last_execution, tz=timezone.utc).isoformat()
+                        if s.last_execution else None
+                }
+                for s in self.stages
+            ]
+        }
+
+
+# ============================================================================
+# ETAPAS PRÉ-DEFINIDAS
+# ============================================================================
+
+async def clean_price_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Limpa dados de preço."""
+    cleaned = {}
+    
+    # Validar BTC
+    btc_price = raw_data.get("btc_price", 0)
+    if btc_price and btc_price > 0:
+        # Remover preços impossíveis
+        if 1000 < btc_price < 1000000:
+            cleaned["btc_price"] = btc_price
+    
+    # Validar closes
+    closes = raw_data.get("closes", [])
+    if closes and len(closes) > 0:
+        # Filtrar valores inválidos
+        valid_closes = [c for c in closes if c and 1000 < c < 1000000]
+        if valid_closes:
+            cleaned["closes"] = valid_closes
+    
+    return cleaned
+
+
+async def validate_data_quality(data: Dict[str, Any]) -> DataQuality:
+    """Valida qualidade dos dados."""
+    issues = []
+    
+    if "btc_price" not in data or not data["btc_price"]:
+        issues.append("BTC price inválido")
+    
+    if "closes" not in data or len(data.get("closes", [])) < 20:
+        issues.append("Dados de closes insuficientes")
+    
+    is_valid = len(issues) == 0
+    
+    return DataQuality(
+        is_valid=is_valid,
+        age_seconds=data.get("age_seconds", 0),
+        source=data.get("source", "unknown"),
+        issues=issues
+    )
+
+
+async def extract_market_features(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extrai features de mercado."""
+    features = {}
+    
+    closes = data.get("closes", [])
+    if len(closes) >= 20:
+        # Variações
+        features["change_1h"] = ((closes[-1] - closes[-2]) / closes[-2] * 100) if len(closes) >= 2 else 0
+        features["change_4h"] = ((closes[-1] - closes[-5]) / closes[-5] * 100) if len(closes) >= 5 else 0
+        features["change_24h"] = ((closes[-1] - closes[-25]) / closes[-25] * 100) if len(closes) >= 25 else 0
+        
+        # Volatilidade
+        if len(closes) >= 20:
+            returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, min(20, len(closes)))]
+            features["volatility_1d"] = (max(returns) - min(returns)) * 100 if returns else 0
+            features["avg_volume"] = sum(returns) / len(returns) if returns else 0
+        
+        # Níveis
+        features["high_20"] = max(closes[-20:])
+        features["low_20"] = min(closes[-20:])
+        features["avg_20"] = sum(closes[-20:]) / 20
+        
+        # Range position
+        current = closes[-1]
+        high = features["high_20"]
+        low = features["low_20"]
+        if high != low:
+            features["range_position"] = (current - low) / (high - low)
+        else:
+            features["range_position"] = 0.5
+    
+    return {**data, "features": features}
+
+
+# ============================================================================
+# SINGLETON
+# ============================================================================
+
+_pipeline: Optional[DataPipeline] = None
+
+
+def get_pipeline() -> DataPipeline:
+    global _pipeline
+    if _pipeline is None:
+        _pipeline = DataPipeline()
+        # Adicionar estágios padrão
+        _pipeline.add_stage("clean", clean_price_data)
+        _pipeline.add_stage("validate", lambda d: validate_data_quality(d))
+        _pipeline.add_stage("features", extract_market_features)
+    return _pipeline

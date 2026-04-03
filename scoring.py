@@ -1,413 +1,444 @@
 """
-score_system.py — Sistema de Pontuação do Jarvis
+scoring.py — Composite 0–100 signal scoring engine
 
-Sistema de pontuação baseado em múltiplos fatores:
-- Score final de 0-100
-- Classificação: Sem sinal / Fraco / Moderado / Forte
-- Decisão baseada no score
+Score bands:
+  < 35  → REJECT
+  35–59 → WATCHLIST (allow signals >= 35)
+  60–74 → VALID
+  75+   → HIGH_CONVICTION
 
-LÓGICA:
-score = 0
+Base weights sum to 1.0:
+  relative_strength   0.20
+  adx_regime          0.15
+  rsi_quality         0.15
+  funding             0.15
+  oi_acceleration     0.15
+  bb_squeeze          0.10
+  atr_quality         0.10
 
-# Tendência (máx 30 pts)
-if trend_bull: score += 30
-elif trend_neutral: score += 15
-else: score -= 10
+UPGRADE: Regime-adaptive weights
+  TRENDING  → boost adx_regime, relative_strength, atr_quality
+  RANGING   → boost bb_squeeze, funding, oi_acceleration
+  WEAK      → balanced, slight mean-reversion bias
+  Adaptive weights (learned from DB) applied first; regime multipliers on top.
 
-# Força (máx 20 pts)
-if adx > 25: score += 20
-elif adx > 15: score += 10
-
-# Volume (máx 15 pts)
-if volume_up: score += 15
-elif volume_normal: score += 8
-
-# Momentum (máx 20 pts)
-if momentum_strong: score += 20
-elif momentum_weak: score += 10
-
-# Funding/Squeeze (máx 15 pts)
-if funding_dangerous: score -= 15
-elif funding_ok: score += 10
-
-# DECISÃO FINAL:
-# 0-30: WAIT - Sem sinal
-# 31-50: WATCH - Sinal fraco, monitorar
-# 51-70: CONSIDER - Sinal moderado, considerar
-# 71-100: ACT - Sinal forte, agir
+UPGRADE: Expected Value (EV) scoring
+  ev_score = P(win) × reward_risk_ratio − (1 − P(win))
+  Stored in ScoreResult for ranking tie-breaks.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
 from enum import Enum
+from typing import Dict, List, Optional
 
+import numpy as np
+
+from btc_regime import RegimeResult, RelativeStrengthResult, Regime
+from derivatives import FundingResult, OIAccelerationResult, LiquidationResult
+from filters import FilterResult
 from logger import get_logger
+from squeeze_detector import detect_squeeze, score_adjustment_for_squeeze
 
-log = get_logger("score")
+log = get_logger("scoring")
 
 
-class SignalStrength(Enum):
-    WAIT = "WAIT"           # 0-30 - Aguardar
-    WATCH = "WATCH"         # 31-50 - Monitorar
-    CONSIDER = "CONSIDER"   # 51-70 - Considerar
-    ACT = "ACT"             # 71-100 - Agir
+# ---------------------------------------------------------------------------
+# Score band enum
+# ---------------------------------------------------------------------------
 
+class ScoreBand(str, Enum):
+    REJECT          = "REJECT"
+    WATCHLIST       = "WATCHLIST"
+    VALID           = "VALID"
+    HIGH_CONVICTION = "HIGH_CONVICTION"
+
+
+def classify_score(score: float) -> ScoreBand:
+    if score < 35:
+        return ScoreBand.REJECT
+    elif score < 60:
+        return ScoreBand.WATCHLIST
+    elif score < 75:
+        return ScoreBand.VALID
+    else:
+        return ScoreBand.HIGH_CONVICTION
+
+
+# ---------------------------------------------------------------------------
+# Sub-score helpers (unchanged)
+# ---------------------------------------------------------------------------
+
+def _score_adx_regime(regime: RegimeResult, direction: str) -> float:
+    if regime.regime == Regime.RANGING:
+        return 50.0   # Afrouxado: 30 -> 50 para permitir mais sinais em range
+    base = min(regime.adx * 2.5, 100.0)
+    if direction == "LONG"  and regime.trend_direction == "UP":
+        base = min(base + 15, 100)
+    elif direction == "SHORT" and regime.trend_direction == "DOWN":
+        base = min(base + 15, 100)
+    elif regime.trend_direction == "NEUTRAL":
+        base = max(base - 10, 30)  # Afrouxado
+    else:
+        base = max(base - 15, 20)  # Afrouxado
+    return round(base, 2)
+
+
+def _score_relative_strength(rs: RelativeStrengthResult, direction: str) -> float:
+    score = 50.0
+    rs_pct = rs.rs_pct
+    if direction == "LONG":
+        if rs_pct > 8:     score = 95.0
+        elif rs_pct > 4:   score = 80.0
+        elif rs_pct > 0:   score = 65.0
+        elif rs_pct > -8:  score = 50.0
+        else:              score = 30.0
+    else:
+        if rs_pct < -8:    score = 95.0
+        elif rs_pct < -4:  score = 80.0
+        elif rs_pct < 0:   score = 65.0
+        elif rs_pct < 8:   score = 50.0
+        else:              score = 30.0
+    return round(score, 2)
+
+
+def _score_rsi_quality(closes: List[float], direction: str) -> float:
+    from filters import _compute_rsi
+    rsi = _compute_rsi(closes)
+    if direction == "LONG":
+        if   45 <= rsi <= 70: return 90.0
+        elif 40 <= rsi <  45: return 75.0
+        elif 35 <= rsi <  40: return 60.0
+        elif 70 <  rsi <= 75: return 55.0
+        elif rsi > 75:        return 25.0
+        else:                 return 40.0
+    else:
+        if   30 <= rsi <= 55: return 90.0
+        elif 55 <  rsi <= 60: return 75.0
+        elif 60 <  rsi <= 65: return 60.0
+        elif 25 <= rsi <  30: return 55.0
+        elif rsi < 25:        return 25.0
+        else:                 return 40.0
+
+
+def _score_bb_squeeze(closes: List[float]) -> float:
+    from filters import _compute_bb_width
+    width = _compute_bb_width(closes)
+    if   width < 0.03: return 95.0
+    elif width < 0.05: return 80.0
+    elif width < 0.08: return 65.0
+    elif width < 0.10: return 50.0
+    elif width < 0.15: return 35.0
+    else:              return 20.0
+
+
+def _score_atr_quality(
+    high: List[float], low: List[float], close: List[float], swing_origin: float,
+) -> float:
+    from filters import _compute_atr, ATR_LATE_ENTRY_MULTIPLIER
+    atr = _compute_atr(high, low, close)
+    if atr < 1e-10:
+        return 50.0
+    ratio = abs(close[-1] - swing_origin) / atr
+    if   ratio < 0.5:  return 95.0
+    elif ratio < 1.0:  return 80.0
+    elif ratio < 1.5:  return 65.0
+    elif ratio < 2.0:  return 45.0
+    else:              return 20.0
+
+
+# ---------------------------------------------------------------------------
+# ScoreResult
+# ---------------------------------------------------------------------------
 
 @dataclass
-class ScoreBreakdown:
-    """Detalhamento do score por categoria."""
-    trend: float = 0.0
-    strength: float = 0.0
-    volume: float = 0.0
-    momentum: float = 0.0
-    funding: float = 0.0
-    regime: float = 0.0
-    total: float = 0.0
-    
-    def to_dict(self) -> Dict[str, float]:
-        return {
-            "trend": self.trend,
-            "strength": self.strength,
-            "volume": self.volume,
-            "momentum": self.momentum,
-            "funding": self.funding,
-            "regime": self.regime,
-            "total": self.total,
-        }
+class ScoreResult:
+    symbol:     str
+    direction:  str
+    total:      float
+    band:       ScoreBand
+    components: Dict[str, float] = field(default_factory=dict)
+    liq_risk:   str = "LOW"
+    reject_reason: Optional[str] = None
+    # UPGRADE: new fields
+    dominant_component: str   = ""       # highest weighted-contribution component
+    ev_score:           float = 0.0      # expected value estimate
+    regime_used:        str   = "UNKNOWN"
+    effective_weights:  Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def is_tradeable(self) -> bool:
+        return self.band in (ScoreBand.VALID, ScoreBand.HIGH_CONVICTION)
 
 
-@dataclass
-class SignalDecision:
-    """Decisão final baseada no score."""
-    symbol: str
-    direction: str  # LONG ou SHORT
-    score: float
-    strength: SignalStrength
-    breakdown: ScoreBreakdown
-    reasons: List[str]
-    warnings: List[str]
-    action: str
-    confidence: float
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "symbol": self.symbol,
-            "direction": self.direction,
-            "score": self.score,
-            "strength": self.strength.value,
-            "breakdown": self.breakdown.to_dict(),
-            "reasons": self.reasons,
-            "warnings": self.warnings,
-            "action": self.action,
-            "confidence": self.confidence,
-        }
+# ---------------------------------------------------------------------------
+# Base weights
+# ---------------------------------------------------------------------------
+
+WEIGHTS: Dict[str, float] = {
+    "relative_strength": 0.20,
+    "adx_regime":        0.15,
+    "rsi_quality":       0.15,
+    "funding":           0.15,
+    "oi_acceleration":   0.15,
+    "bb_squeeze":        0.10,
+    "atr_quality":       0.10,
+}
+
+assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "Weights must sum to 1.0"
 
 
-class ScoreSystem:
+# ---------------------------------------------------------------------------
+# UPGRADE: Regime weight multipliers
+#
+# TRENDING: trend-following factors are more predictive
+# RANGING:  compression + derivatives dominate; trend indicators are noise
+# WEAK:     balanced, slight mean-reversion bias
+# ---------------------------------------------------------------------------
+
+REGIME_WEIGHT_MULTIPLIERS: Dict[str, Dict[str, float]] = {
+    Regime.TRENDING.value: {
+        "relative_strength": 1.30,  # momentum leaders matter more in trends
+        "adx_regime":        1.40,  # trend strength IS the signal
+        "rsi_quality":       1.00,
+        "funding":           0.85,  # funding less predictive in strong trends
+        "oi_acceleration":   1.10,
+        "bb_squeeze":        0.60,  # squeezes less relevant mid-trend
+        "atr_quality":       1.25,  # entry timing more critical in trends
+    },
+    Regime.RANGING.value: {
+        "relative_strength": 0.80,  # RS less meaningful in chop
+        "adx_regime":        0.50,  # ADX will be low anyway
+        "rsi_quality":       1.30,  # RSI mean-reversion more predictive
+        "funding":           1.35,  # funding extremes reliably revert in ranges
+        "oi_acceleration":   1.30,  # OI build-up often precedes breakout
+        "bb_squeeze":        1.45,  # compression → breakout is ranging edge
+        "atr_quality":       0.90,
+    },
+    Regime.WEAK.value: {
+        "relative_strength": 1.00,
+        "adx_regime":        0.75,
+        "rsi_quality":       1.15,
+        "funding":           1.15,
+        "oi_acceleration":   1.15,
+        "bb_squeeze":        1.10,
+        "atr_quality":       1.00,
+    },
+}
+
+
+def get_effective_weights(
+    regime: Optional[Regime] = None,
+    adaptive_weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
     """
-    Sistema de pontuação multi-fator.
-    
-    Calcula score de 0-100 baseado em:
-    1. Tendência (trend)
-    2. Força (strength/ADX)
-    3. Volume
-    4. Momentum
-    5. Funding
-    6. Regime
+    Compute effective weights in two passes:
+      1. Start from adaptive_weights (learned via DB) or BASE_WEIGHTS
+      2. Apply regime multipliers (structural market-phase bias)
+      3. Renormalise to sum=1.0
+
+    This keeps two orthogonal signals cleanly separated:
+      adaptive_weights  = what has historically worked (trained signal)
+      regime_multipliers = what the current market structure favours (contextual bias)
     """
-    
-    # Limites de cada categoria
-    MAX_TREND = 30
-    MAX_STRENGTH = 20
-    MAX_VOLUME = 15
-    MAX_MOMENTUM = 20
-    MAX_FUNDING = 15
-    MAX_REGIME = 0  # Regime já é levado em conta na decisão
-    
-    # Limiar de decisão
-    THRESHOLD_WAIT = 30
-    THRESHOLD_WATCH = 50
-    THRESHOLD_CONSIDER = 70
-    
-    def __init__(self):
-        self._last_scores: Dict[str, float] = {}
-    
-    def calculate(
-        self,
-        symbol: str,
-        direction: str,
-        trend_score: float,      # -30 a +30 (negativo = baixa)
-        adx: float,             # 0-100
-        volume_ratio: float,     # 0-2 (1 = normal)
-        momentum: float,         # -100 a +100
-        funding_rate: float,     # -0.1 a +0.1 (decimal)
-        regime: str,             # TRENDING, RANGING, WEAK
-        btc_change: float = 0,  # -100 a +100
-    ) -> SignalDecision:
-        """
-        Calcula score completo para um símbolo.
-        
-        Returns:
-            SignalDecision com score e decisão
-        """
-        breakdown = ScoreBreakdown()
-        reasons = []
-        warnings = []
-        
-        # 1. TREND (máx 30 pts)
-        # Direção alinhada com tendencia do BTC
-        if direction == "LONG":
-            if trend_score > 10:
-                breakdown.trend = self.MAX_TREND
-                reasons.append(f"Tendencia bullish confirmada (+{trend_score:.0f})")
-            elif trend_score > 0:
-                breakdown.trend = self.MAX_TREND * 0.6
-                reasons.append(f"Tendencia positiva ({trend_score:.0f})")
-            elif trend_score > -10:
-                breakdown.trend = self.MAX_TREND * 0.3
-                warnings.append("Tendencia incerta")
-            else:
-                breakdown.trend = 0
-                warnings.append("Tendencia bearish - cuidado com LONG")
-        else:  # SHORT
-            if trend_score < -10:
-                breakdown.trend = self.MAX_TREND
-                reasons.append(f"Tendencia bearish confirmada ({trend_score:.0f})")
-            elif trend_score < 0:
-                breakdown.trend = self.MAX_TREND * 0.6
-                reasons.append(f"Tendencia negativa ({trend_score:.0f})")
-            else:
-                breakdown.trend = self.MAX_TREND * 0.3
-                warnings.append("Tendencia bullish - cuidado com SHORT")
-        
-        # 2. STRENGTH (máx 20 pts)
-        # Baseado no ADX
-        if adx > 30:
-            breakdown.strength = self.MAX_STRENGTH
-            reasons.append(f"Força forte (ADX={adx:.0f})")
-        elif adx > 20:
-            breakdown.strength = self.MAX_STRENGTH * 0.7
-            reasons.append(f"Força moderada (ADX={adx:.0f})")
-        elif adx > 10:
-            breakdown.strength = self.MAX_STRENGTH * 0.4
-            warnings.append(f"ADX fraco ({adx:.0f})")
-        else:
-            breakdown.strength = self.MAX_STRENGTH * 0.1
-            warnings.append(f"ADX muito fraco ({adx:.0f}) - sem tendência")
-        
-        # 3. VOLUME (máx 15 pts)
-        if volume_ratio > 1.5:
-            breakdown.volume = self.MAX_VOLUME
-            reasons.append(f"Volume elevado ({volume_ratio:.1f}x)")
-        elif volume_ratio > 1.0:
-            breakdown.volume = self.MAX_VOLUME * 0.7
-        elif volume_ratio > 0.7:
-            breakdown.volume = self.MAX_VOLUME * 0.4
-            warnings.append("Volume abaixo da média")
-        else:
-            breakdown.volume = self.MAX_VOLUME * 0.1
-            warnings.append("Volume muito baixo")
-        
-        # 4. MOMENTUM (máx 20 pts)
-        if direction == "LONG":
-            if momentum > 50:
-                breakdown.momentum = self.MAX_MOMENTUM
-                reasons.append(f"Momentum bullish forte ({momentum:.0f})")
-            elif momentum > 20:
-                breakdown.momentum = self.MAX_MOMENTUM * 0.7
-                reasons.append(f"Momentum positivo ({momentum:.0f})")
-            elif momentum > -20:
-                breakdown.momentum = self.MAX_MOMENTUM * 0.4
-            else:
-                breakdown.momentum = self.MAX_MOMENTUM * 0.2
-                warnings.append("Momentum bearish")
-        else:  # SHORT
-            if momentum < -50:
-                breakdown.momentum = self.MAX_MOMENTUM
-                reasons.append(f"Momentum bearish forte ({momentum:.0f})")
-            elif momentum < -20:
-                breakdown.momentum = self.MAX_MOMENTUM * 0.7
-                reasons.append(f"Momentum negativo ({momentum:.0f})")
-            elif momentum < 20:
-                breakdown.momentum = self.MAX_MOMENTUM * 0.4
-            else:
-                breakdown.momentum = self.MAX_MOMENTUM * 0.2
-                warnings.append("Momentum bullish - cuidado com SHORT")
-        
-        # 5. FUNDING (máx 15 pts)
-        # Funding alto é ruim para LONG
-        funding_pct = funding_rate * 100  # Converter para %
-        
-        if direction == "LONG":
-            if funding_pct > 0.1:
-                breakdown.funding = -self.MAX_FUNDING
-                warnings.append(f"⚠️ FUNDING EXTREMO ({funding_pct:.2f}%) - risco long squeeze!")
-            elif funding_pct > 0.03:
-                breakdown.funding = -self.MAX_FUNDING * 0.5
-                warnings.append(f"Funding alto ({funding_pct:.2f}%)")
-            elif funding_pct > 0:
-                breakdown.funding = self.MAX_FUNDING * 0.5
-                reasons.append(f"Funding normal ({funding_pct:.2f}%)")
-            else:
-                breakdown.funding = self.MAX_FUNDING * 0.8
-                reasons.append(f"Funding negativo ({funding_pct:.2f}%) - bom para LONG")
-        else:  # SHORT
-            if funding_pct < -0.1:
-                breakdown.funding = -self.MAX_FUNDING
-                warnings.append(f"⚠️ FUNDING EXTREMO ({funding_pct:.2f}%) - risco short squeeze!")
-            elif funding_pct < -0.03:
-                breakdown.funding = -self.MAX_FUNDING * 0.5
-                warnings.append(f"Funding muito baixo ({funding_pct:.2f}%)")
-            elif funding_pct < 0:
-                breakdown.funding = self.MAX_FUNDING * 0.5
-                reasons.append(f"Funding negativo ({funding_pct:.2f}%)")
-            else:
-                breakdown.funding = self.MAX_FUNDING * 0.8
-                reasons.append(f"Funding positivo ({funding_pct:.2f}%) - bom para SHORT")
-        
-        # 6. REGIME (bônus/penalidade)
-        if regime == "TRENDING":
-            breakdown.regime = 5
-            reasons.append("Regime de tendência - melhor probabilidade")
-        elif regime == "RANGING":
-            breakdown.regime = 0
-            warnings.append("Regime lateral - reduza expectativa")
-        else:
-            breakdown.regime = -5
-            warnings.append("Mercado sem direção")
-        
-        # CALCULAR TOTAL
-        breakdown.total = (
-            breakdown.trend +
-            breakdown.strength +
-            breakdown.volume +
-            breakdown.momentum +
-            breakdown.funding +
-            breakdown.regime
-        )
-        
-        # Limitar entre 0 e 100
-        breakdown.total = max(0, min(100, breakdown.total))
-        
-        # DETERMINAR FORÇA
-        if breakdown.total >= self.THRESHOLD_CONSIDER:
-            strength = SignalStrength.ACT
-        elif breakdown.total >= self.THRESHOLD_WATCH:
-            strength = SignalStrength.CONSIDER
-        elif breakdown.total >= self.THRESHOLD_WAIT:
-            strength = SignalStrength.WATCH
-        else:
-            strength = SignalStrength.WAIT
-        
-        # DECIDIR AÇÃO
-        action = self._get_action(strength, direction, warnings)
-        confidence = self._get_confidence(breakdown.total, warnings)
-        
-        # Registrar para histórico
-        self._last_scores[symbol] = breakdown.total
-        
-        # Log
+    base = deepcopy(adaptive_weights) if adaptive_weights else deepcopy(WEIGHTS)
+    # Merge: ensure all keys exist (guards against schema drift)
+    for k in WEIGHTS:
+        base.setdefault(k, WEIGHTS[k])
+
+    if regime is not None:
+        mults = REGIME_WEIGHT_MULTIPLIERS.get(regime.value, {})
+        for k in base:
+            base[k] = base[k] * mults.get(k, 1.0)
+
+    total = sum(base.values())
+    if total > 1e-10:
+        base = {k: round(v / total, 6) for k, v in base.items()}
+
+    return base
+
+
+# ---------------------------------------------------------------------------
+# UPGRADE: Expected Value estimator
+#
+# EV = P(win) × reward − (1 − P(win)) × risk
+# We approximate:
+#   P(win)  ≈ score / 100
+#   reward  = tp_atr_mult × ATR
+#   risk    = sl_atr_mult  × ATR
+# Result normalised to 0–100 (50 = break-even).
+# ---------------------------------------------------------------------------
+
+def _estimate_ev(
+    score: float,
+    high:  List[float],
+    low:   List[float],
+    close: List[float],
+    tp_atr_mult: float = 2.0,
+    sl_atr_mult: float = 1.0,
+) -> float:
+    from filters import _compute_atr
+    atr = _compute_atr(high, low, close)
+    if atr < 1e-10:
+        return 50.0
+
+    p_win  = score / 100.0
+    rr     = tp_atr_mult / (sl_atr_mult + 1e-10)
+    ev     = p_win * rr - (1.0 - p_win)           # positive = edge
+    # Map to 0–100: ev=0 → 50, ev=1 → 75, ev=-1 → 25
+    ev_score = round(50.0 + ev * 25.0, 2)
+    return max(0.0, min(100.0, ev_score))
+
+
+# ---------------------------------------------------------------------------
+# Public scorer
+# ---------------------------------------------------------------------------
+
+def compute_score(
+    symbol:           str,
+    direction:        str,
+    closes:           List[float],
+    high:             List[float],
+    low:              List[float],
+    swing_origin:     float,
+    regime:           RegimeResult,
+    rs:               RelativeStrengthResult,
+    funding:          FundingResult,
+    oi_accel:         OIAccelerationResult,
+    liq:              Optional[LiquidationResult] = None,
+    filter_results:   Optional[List[FilterResult]] = None,
+    adaptive_weights: Optional[Dict[str, float]] = None,   # from AdaptiveEngine
+    sector_heat:      float = 50.0,    # UPGRADE: narrative heat score 0–100 (50=neutral)
+    vol_confirm_bonus: float = 0.0,    # UPGRADE: from VolumeConfirmResult.score_bonus
+) -> ScoreResult:
+    """
+    Compute composite 0–100 score for a symbol/direction.
+    Returns a REJECT band if any hard filter failed.
+
+    Additive bonuses applied AFTER weighted composite (not part of weights):
+      sector_heat:      narrative momentum bonus — max ±5 points
+      vol_confirm_bonus: volume confirmation bonus — −10 to +5 points
+    These are capped so they cannot push a REJECT into VALID.
+    """
+    direction = direction.upper()
+
+    # Hard filter gate
+    if filter_results:
+        failed = [f for f in filter_results if not f.passed]
+        if failed:
+            reason = f"{failed[0].filter_name}: {failed[0].reason}"
+            log.info(
+                "PERFORMANCE_LOGGED",
+                f"REJECT {symbol} ({direction}) — filter fail: {reason}",
+                symbol=symbol, direction=direction, score=0.0,
+            )
+            return ScoreResult(
+                symbol=symbol, direction=direction,
+                total=0.0, band=ScoreBand.REJECT,
+                reject_reason=reason,
+            )
+
+    components: Dict[str, float] = {
+        "relative_strength": _score_relative_strength(rs, direction),
+        "adx_regime":        _score_adx_regime(regime, direction),
+        "rsi_quality":       _score_rsi_quality(closes, direction),
+        "funding":           funding.score,
+        "oi_acceleration":   oi_accel.score,
+        "bb_squeeze":        _score_bb_squeeze(closes),
+        "atr_quality":       _score_atr_quality(high, low, closes, swing_origin),
+    }
+
+    # UPGRADE: regime-aware weights
+    effective_w = get_effective_weights(regime.regime, adaptive_weights)
+
+    total = sum(components[k] * effective_w[k] for k in components)
+    total = round(min(max(total, 0.0), 100.0), 2)
+    band  = classify_score(total)
+
+    # UPGRADE: dominant component (highest weighted contribution)
+    contributions = {k: components[k] * effective_w[k] for k in components}
+    dominant = max(contributions, key=contributions.get)
+
+    # UPGRADE: expected value
+    ev = _estimate_ev(total, high, low, closes)
+
+    # UPGRADE: apply additive contextual bonuses
+    # Sector heat: +5 if very hot (heat=100), -5 if very cold (heat=0)
+    heat_bonus = round((sector_heat - 50.0) / 10.0, 2)   # range: -5 to +5
+    heat_bonus = max(-5.0, min(5.0, heat_bonus))
+
+    # Volume confirmation: directly from VolumeConfirmResult.score_bonus
+    vol_bonus = max(-10.0, min(5.0, vol_confirm_bonus))
+
+    total_pre_bonus = total
+    total = round(min(max(total + heat_bonus + vol_bonus, 0.0), 100.0), 2)
+    band  = classify_score(total)
+
+    if heat_bonus != 0 or vol_bonus != 0:
         log.info(
-            "SCORE_SYSTEM",
-            f"{symbol} {direction}: score={breakdown.total:.0f} strength={strength.value} "
-            f"action={action}",
-            extra={"breakdown": breakdown.to_dict()}
-        )
-        
-        return SignalDecision(
+            "PERFORMANCE_LOGGED",
+            f"contextual bonuses {symbol}: heat={heat_bonus:+.1f} vol={vol_bonus:+.1f} "
+            f"score {total_pre_bonus:.1f} → {total:.1f}",
             symbol=symbol,
-            direction=direction,
-            score=breakdown.total,
-            strength=strength,
-            breakdown=breakdown,
-            reasons=reasons,
-            warnings=warnings,
-            action=action,
-            confidence=confidence,
+        )
+
+    liq_risk = liq.risk_level if liq else "LOW"
+
+    if liq_risk == "HIGH" and band == ScoreBand.HIGH_CONVICTION:
+        band  = ScoreBand.VALID
+        total = min(total, 84.9)
+        log.warning(
+            "PERFORMANCE_LOGGED",
+            f"score downgraded for {symbol}: liq zone HIGH risk",
+            symbol=symbol, direction=direction, score=total,
+        )
+
+    squeeze = detect_squeeze(
+        funding_rate=funding.raw_rate if hasattr(funding, 'raw_rate') else funding.funding_8h if hasattr(funding, 'funding_8h') else None,
+        oi_change_pct=oi_accel.change_pct if hasattr(oi_accel, 'change_pct') else None,
+        current_price=closes[-1] if closes else 0,
+        ath_price=max(closes) if closes else 0,
+        position_direction=direction,
+    )
+    
+    # Squeeze only penalizes, doesn't block
+    if squeeze.is_squeeze:
+        penalty = 15.0  # -15 points penalty
+        total = max(0.0, total - penalty)
+        log.warning(
+            "PERFORMANCE_LOGGED",
+            f"SQUEEZE PENALTY for {symbol}: -{penalty}pts → {total:.1f} [{squeeze.recommendation}]",
+            symbol=symbol, direction=direction, score=total,
+        )
+    elif squeeze.danger_level == "MEDIUM":
+        penalty = 8.0  # -8 points penalty
+        total = max(0.0, total - penalty)
+        log.warning(
+            "PERFORMANCE_LOGGED",
+            f"SQUEEZE WARNING for {symbol}: -{penalty}pts → {total:.1f}",
+            symbol=symbol, direction=direction, score=total,
         )
     
-    def _get_action(self, strength: SignalStrength, direction: str, warnings: List[str]) -> str:
-        """Determina ação baseada na força."""
-        if strength == SignalStrength.WAIT:
-            return "WAIT"
-        
-        if warnings and any("⚠️" in w for w in warnings):
-            return "REDUCE_SIZE"
-        
-        if strength == SignalStrength.WATCH:
-            return "WATCH_ONLY"
-        
-        if strength == SignalStrength.CONSIDER:
-            if direction == "LONG":
-                return "CONSIDER_LONG"
-            else:
-                return "CONSIDER_SHORT"
-        
-        # ACT
-        if direction == "LONG":
-            return "BUY"
-        else:
-            return "SELL"
+    band = classify_score(total)
     
-    def _get_confidence(self, score: float, warnings: List[str]) -> float:
-        """Calcula confiança baseada no score e warnings."""
-        confidence = score / 100
-        
-        # Reduzir confiança por warnings
-        warning_penalty = len(warnings) * 0.05
-        confidence = max(0.1, confidence - warning_penalty)
-        
-        return round(confidence, 2)
-    
-    def get_score_color(self, score: float) -> str:
-        """Retorna emoji baseado no score."""
-        if score >= 75:
-            return "🟢"
-        elif score >= 50:
-            return "🟡"
-        elif score >= 30:
-            return "⚠️"
-        else:
-            return "🔴"
+    # Squeeze already penalized above (lines 405-420)
+    # Band classification handles rejection if score drops below threshold
 
-
-def format_signal_message(decision: SignalDecision) -> str:
-    """Formata mensagem do sinal para display."""
-    color = ScoreSystem().get_score_color(decision.score)
-    
-    emoji_dir = "📈" if decision.direction == "LONG" else "📉"
-    
-    lines = [
-        f"{emoji_dir} *{decision.symbol}/USDT*",
-        "",
-        f"Score: {color} *{decision.score:.0f}*/100",
-        f"Força: {decision.strength.value}",
-        f"Ação: *{decision.action}*",
-        f"Confiança: {decision.confidence*100:.0f}%",
-        "",
-    ]
-    
-    if decision.reasons:
-        lines.append("*✅ Motivos:*")
-        for r in decision.reasons[:3]:
-            lines.append(f"  • {r}")
-        lines.append("")
-    
-    if decision.warnings:
-        lines.append("*⚠️ Cuidados:*")
-        for w in decision.warnings[:3]:
-            lines.append(f"  • {w}")
-        lines.append("")
-    
-    return "\n".join(lines)
-
-
-# Singleton
-_score_system: Optional[ScoreSystem] = None
-
-
-def get_score_system() -> ScoreSystem:
-    global _score_system
-    if _score_system is None:
-        _score_system = ScoreSystem()
-    return _score_system
+    log.info(
+        "PERFORMANCE_LOGGED",
+        f"score {symbol} ({direction}): {total:.1f} [{band}] "
+        f"regime={regime.regime.value} dominant={dominant} ev={ev:.1f}",
+        symbol=symbol, direction=direction, score=total,
+    )
+    return ScoreResult(
+        symbol=symbol,
+        direction=direction,
+        total=total,
+        band=band,
+        components=components,
+        liq_risk=liq_risk,
+        dominant_component=dominant,
+        ev_score=ev,
+        regime_used=regime.regime.value,
+        effective_weights=effective_w,
+    )

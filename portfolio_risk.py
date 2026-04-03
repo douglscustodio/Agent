@@ -1,231 +1,197 @@
 """
-pipeline.py — Pipeline de Dados do Jarvis
+portfolio_risk.py — Portfolio Risk Manager para Jarvis AI Trading Monitor
 
-PIPELINE:
-RAW DATA → CLEAN → VALIDATE → FEATURE → ANALYZE → DECIDE
+Responsabilidades:
+1. Controlar exposição total por símbolo e direção
+2. Limitar trades simultâneos
+3. Detectar correlações perigosas
+4. Limitar alavancagem agregada
+5. Blockear sinais em dados inválidos
 
-Cada etapa:
-1. RAW DATA: Dados crus das APIs
-2. CLEAN: Limpa e formata
-3. VALIDATE: Valida qualidade
-4. FEATURE: Extrai features
-5. ANALYZE: Roda análises
-6. DECIDE: Toma decisões
+Uso:
+    risk_manager = PortfolioRiskManager()
+    approved_signals = risk_manager.filter_signals(signals, macro_snap)
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime, timezone
 import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set
 
 from logger import get_logger
+from data_quality import get_current_quality
 
-log = get_logger("pipeline")
+log = get_logger("portfolio_risk")
+
+SECTOR_CORRELATION: Dict[str, Set[str]] = {
+    "layer1": {"ETH", "SOL", "AVAX", "NEAR", "APT", "SUI", "INJ", "TIA"},
+    "DeFi": {"ARB", "OP", "LDO", "RNDR", "FET", "UNI", "AAVE"},
+    "meme": {"WIF", "BONK", "PEPE", "DOGE"},
+    "AI": {"TAO", "FET", "RNDR", "WLD"},
+    "L2": {"ARB", "OP"},
+}
 
 
 @dataclass
-class DataQuality:
-    """Qualidade dos dados."""
-    is_valid: bool
-    age_seconds: float
-    source: str
-    issues: List[str]
-    
-    def should_block(self) -> bool:
-        return not self.is_valid or self.age_seconds > 300  # 5 min
+class PositionRisk:
+    symbol: str
+    direction: str
+    score: float
+    sector: str
+    correlation_key: Optional[str] = None
 
 
-class PipelineStage:
-    """Uma etapa do pipeline."""
-    
-    def __init__(self, name: str, processor: Callable):
-        self.name = name
-        self.processor = processor
-        self.execution_count = 0
-        self.error_count = 0
-        self.last_execution = 0.0
-    
-    async def execute(self, data: Any) -> Any:
-        self.execution_count += 1
-        self.last_execution = time.time()
-        
-        try:
-            result = await self.processor(data)
-            log.debug("PIPELINE_STAGE", f"{self.name}: OK")
-            return result
-        except Exception as exc:
-            self.error_count += 1
-            log.error("PIPELINE_STAGE", f"{self.name}: ERROR - {exc}")
-            raise
-
-
-class DataPipeline:
-    """
-    Pipeline de processamento de dados.
-    
-    Executa etapas em sequência:
-    1. fetch_raw()
-    2. clean()
-    3. validate()
-    4. extract_features()
-    5. analyze()
-    6. decide()
-    """
-    
+class PortfolioRiskManager:
     def __init__(self):
-        self.stages: List[PipelineStage] = []
-        self._data_cache: Dict[str, Any] = {}
-        self._last_pipeline_time = 0.0
-    
-    def add_stage(self, name: str, processor: Callable) -> None:
-        """Adiciona uma etapa ao pipeline."""
-        stage = PipelineStage(name, processor)
-        self.stages.append(stage)
-        log.info("PIPELINE", f"Stage added: {name} (total: {len(self.stages)})")
-    
-    async def execute(self, initial_data: Any = None) -> Any:
-        """Executa todo o pipeline."""
-        pipeline_start = time.time()
-        current_data = initial_data
+        self._open_positions: Dict[str, PositionRisk] = {}
+        self._last_check: float = time.time()
+        self._lock_period: int = 300
+
+        self.max_simultaneous_trades: int = 3
+        self.max_exposure_per_symbol: float = 0.20
+        self.max_sector_exposure: float = 0.40
+        self.max_correlated_trades: int = 2
+        self.min_data_quality_score: float = 0.60
+
+        self._recent_rejections: List[dict] = []
+
+    def reset_daily(self) -> None:
+        self._open_positions.clear()
+        self._recent_rejections.clear()
+        log.info("PORTFOLIO_RISK", "Daily reset complete")
+
+    def _check_data_quality(self) -> tuple[bool, str]:
+        quality = get_current_quality()
         
-        for stage in self.stages:
-            try:
-                current_data = await stage.execute(current_data)
-            except Exception as exc:
-                log.error("PIPELINE", f"Stage {stage.name} failed: {exc}")
-                return None
+        if quality.quality_score < self.min_data_quality_score:
+            return False, f"Data quality {quality.quality_score:.0%} below minimum {self.min_data_quality_score:.0%}"
         
-        self._last_pipeline_time = time.time() - pipeline_start
+        if quality.warnings:
+            critical_warnings = [w for w in quality.warnings if "desconectado" in w.lower() or "fail" in w.lower()]
+            if critical_warnings:
+                return False, f"Critical data warnings: {critical_warnings[0]}"
         
-        log.info(
-            "PIPELINE",
-            f"Pipeline complete in {self._last_pipeline_time*1000:.0f}ms",
-            stages=len(self.stages),
-            errors=sum(s.error_count for s in self.stages)
-        )
+        if not quality.hyperliquid_available:
+            return False, "Hyperliquid API unavailable"
         
-        return current_data
-    
-    def get_cache(self, key: str) -> Optional[Any]:
-        return self._data_cache.get(key)
-    
-    def set_cache(self, key: str, value: Any) -> None:
-        self._data_cache[key] = value
-    
-    def clear_cache(self) -> None:
-        self._data_cache.clear()
-    
-    def get_stats(self) -> Dict[str, Any]:
+        if quality.market_age_minutes > 10:
+            return False, f"Market data stale ({quality.market_age_minutes:.0f}min)"
+        
+        return True, "OK"
+
+    def _check_sector_correlation(self, symbol: str, direction: str) -> tuple[bool, str]:
+        sector_key = None
+        for key, symbols in SECTOR_CORRELATION.items():
+            if symbol in symbols:
+                sector_key = key
+                break
+        
+        if not sector_key:
+            return True, "OK"
+        
+        same_direction_in_sector = [
+            p for p in self._open_positions.values()
+            if p.sector == sector_key and p.direction == direction
+        ]
+        
+        if len(same_direction_in_sector) >= self.max_correlated_trades:
+            return False, f"Too many correlated trades in {sector_key}/{direction} ({len(same_direction_in_sector)}/{self.max_correlated_trades})"
+        
+        return True, "OK"
+
+    def _check_macro_regime(self, macro_snap) -> tuple[bool, str]:
+        if not macro_snap:
+            return True, "OK"
+        
+        risk_score = getattr(macro_snap, "risk_score", 50)
+        
+        if risk_score >= 80:
+            return False, f"Extreme macro risk ({risk_score:.0f}) - no new positions"
+        
+        if risk_score >= 70:
+            log.warning("PORTFOLIO_RISK", f"High macro risk ({risk_score:.0f}) - limiting positions")
+        
+        return True, "OK"
+
+    def filter_signals(
+        self,
+        signals: List,
+        macro_snap = None,
+    ) -> tuple[List, List[dict]]:
+        approved = []
+        rejected = []
+        
+        data_ok, data_reason = self._check_data_quality()
+        if not data_ok:
+            log.error("PORTFOLIO_RISK", f"BLOCKING ALL SIGNALS: {data_reason}")
+            for sig in signals:
+                rejected.append({
+                    "symbol": sig.symbol,
+                    "reason": f"DATA_INVALID: {data_reason}",
+                    "timestamp": time.time(),
+                })
+            return [], rejected
+        
+        macro_ok, macro_reason = self._check_macro_regime(macro_snap)
+        if not macro_ok:
+            log.warning("PORTFOLIO_RISK", f"BLOCKING ALL SIGNALS: {macro_reason}")
+            for sig in signals:
+                rejected.append({
+                    "symbol": sig.symbol,
+                    "reason": f"MACRO_BLOCK: {macro_reason}",
+                    "timestamp": time.time(),
+                })
+            return [], rejected
+        
+        for sig in signals:
+            symbol = sig.symbol
+            direction = sig.direction
+            
+            sector_key = None
+            for key, symbols in SECTOR_CORRELATION.items():
+                if symbol in symbols:
+                    sector_key = key
+                    break
+            
+            corr_ok, corr_reason = self._check_sector_correlation(symbol, direction)
+            if not corr_ok:
+                rejected.append({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "reason": corr_reason,
+                    "score": sig.score,
+                    "timestamp": time.time(),
+                })
+                log.warning("PORTFOLIO_RISK", f"REJECTED {symbol}: {corr_reason}")
+                continue
+            
+            if len(approved) >= self.max_simultaneous_trades:
+                rejected.append({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "reason": f"Max simultaneous trades ({self.max_simultaneous_trades}) reached",
+                    "score": sig.score,
+                    "timestamp": time.time(),
+                })
+                continue
+            
+            approved.append(sig)
+            self._open_positions[symbol] = PositionRisk(
+                symbol=symbol,
+                direction=direction,
+                score=sig.score,
+                sector=sector_key or "other",
+            )
+            log.info("PORTFOLIO_RISK", f"APPROVED {symbol}/{direction} score={sig.score:.0f}")
+        
+        if rejected:
+            self._recent_rejections.extend(rejected[-20:])
+        
+        return approved, rejected
+
+    def get_status(self) -> dict:
         return {
-            "stages": len(self.stages),
-            "total_time_ms": self._last_pipeline_time * 1000,
-            "cache_size": len(self._data_cache),
-            "stage_stats": [
-                {
-                    "name": s.name,
-                    "executions": s.execution_count,
-                    "errors": s.error_count,
-                    "last_execution": datetime.fromtimestamp(s.last_execution, tz=timezone.utc).isoformat()
-                        if s.last_execution else None
-                }
-                for s in self.stages
-            ]
+            "open_positions": len(self._open_positions),
+            "max_allowed": self.max_simultaneous_trades,
+            "data_quality_ok": self._check_data_quality()[0],
+            "recent_rejections": len(self._recent_rejections[-10:]),
         }
-
-
-# ============================================================================
-# ETAPAS PRÉ-DEFINIDAS
-# ============================================================================
-
-async def clean_price_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Limpa dados de preço."""
-    cleaned = {}
-    
-    # Validar BTC
-    btc_price = raw_data.get("btc_price", 0)
-    if btc_price and btc_price > 0:
-        # Remover preços impossíveis
-        if 1000 < btc_price < 1000000:
-            cleaned["btc_price"] = btc_price
-    
-    # Validar closes
-    closes = raw_data.get("closes", [])
-    if closes and len(closes) > 0:
-        # Filtrar valores inválidos
-        valid_closes = [c for c in closes if c and 1000 < c < 1000000]
-        if valid_closes:
-            cleaned["closes"] = valid_closes
-    
-    return cleaned
-
-
-async def validate_data_quality(data: Dict[str, Any]) -> DataQuality:
-    """Valida qualidade dos dados."""
-    issues = []
-    
-    if "btc_price" not in data or not data["btc_price"]:
-        issues.append("BTC price inválido")
-    
-    if "closes" not in data or len(data.get("closes", [])) < 20:
-        issues.append("Dados de closes insuficientes")
-    
-    is_valid = len(issues) == 0
-    
-    return DataQuality(
-        is_valid=is_valid,
-        age_seconds=data.get("age_seconds", 0),
-        source=data.get("source", "unknown"),
-        issues=issues
-    )
-
-
-async def extract_market_features(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Extrai features de mercado."""
-    features = {}
-    
-    closes = data.get("closes", [])
-    if len(closes) >= 20:
-        # Variações
-        features["change_1h"] = ((closes[-1] - closes[-2]) / closes[-2] * 100) if len(closes) >= 2 else 0
-        features["change_4h"] = ((closes[-1] - closes[-5]) / closes[-5] * 100) if len(closes) >= 5 else 0
-        features["change_24h"] = ((closes[-1] - closes[-25]) / closes[-25] * 100) if len(closes) >= 25 else 0
-        
-        # Volatilidade
-        if len(closes) >= 20:
-            returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, min(20, len(closes)))]
-            features["volatility_1d"] = (max(returns) - min(returns)) * 100 if returns else 0
-            features["avg_volume"] = sum(returns) / len(returns) if returns else 0
-        
-        # Níveis
-        features["high_20"] = max(closes[-20:])
-        features["low_20"] = min(closes[-20:])
-        features["avg_20"] = sum(closes[-20:]) / 20
-        
-        # Range position
-        current = closes[-1]
-        high = features["high_20"]
-        low = features["low_20"]
-        if high != low:
-            features["range_position"] = (current - low) / (high - low)
-        else:
-            features["range_position"] = 0.5
-    
-    return {**data, "features": features}
-
-
-# ============================================================================
-# SINGLETON
-# ============================================================================
-
-_pipeline: Optional[DataPipeline] = None
-
-
-def get_pipeline() -> DataPipeline:
-    global _pipeline
-    if _pipeline is None:
-        _pipeline = DataPipeline()
-        # Adicionar estágios padrão
-        _pipeline.add_stage("clean", clean_price_data)
-        _pipeline.add_stage("validate", lambda d: validate_data_quality(d))
-        _pipeline.add_stage("features", extract_market_features)
-    return _pipeline

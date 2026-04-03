@@ -1,298 +1,221 @@
 """
-ai_analyst.py — Camada de inteligência via Groq API
-Pipeline: scanner → scoring → ranking (top 5) → AI → alerta final
-
-A IA valida candidatos que já passaram pelo filtro quantitativo.
-Nunca substitui o sistema — explica, valida e enriquece o sinal.
-
-Responsabilidades:
-  1. Validar o setup com linguagem natural em PT-BR
-  2. Identificar riscos que regras fixas não capturam
-  3. Gerar explicação humanizada para o Telegram
-  4. Filtrar sinais com baixa confiança contextual
-
-Modelo: llama-3.1-8b-instant (rápido, barato, suficiente)
-Fallback: se API falhar, sinal segue sem análise de IA
-Chave: GROQ_API_KEY
+alerts_dedup.py — Alert deduplication engine
+Rules:
+  - 2-hour cooldown per symbol+direction key
+  - Override if score delta > 10 points vs last sent
+  - DB-backed persistence (survives restarts)
+  - In-memory fast-path cache
+  - Full JSON event logging on every decision
 """
 
-import json
-import os
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple
 
-import aiohttp
-
+from database import get_pool, write_system_event
 from logger import get_logger
-from data_quality import update_quality
 
-log = get_logger("ai_analyst")
+log = get_logger("alerts_dedup")
 
-GROQ_API_URL  = "https://api.groq.com/openai/v1/chat/completions"
-AI_MODEL      = "llama-3.1-8b-instant"    # rápido + barato
-AI_MAX_TOKENS = 400
-AI_TIMEOUT_S  = 10     # não bloqueia o ciclo de scan
-AI_CALL_COOLDOWN = 60  # segundos entre chamadas para o mesmo símbolo
-
-_last_call: Dict[str, float] = {}
-
+COOLDOWN_SECONDS   = 3_600    # 1 hora (era 2h — muito agressivo)
+SCORE_DELTA_OVERRIDE = 8.0    # reenviar se score melhorou 8+ pts
+DAILY_MAX_PER_SYMBOL = 3  # máximo 3 alertas do mesmo símbolo por dia
 
 # ---------------------------------------------------------------------------
-# Resultado da análise
+# In-memory cache entry
 # ---------------------------------------------------------------------------
 
 @dataclass
-class AIAnalysis:
-    symbol:       str
-    direction:    str
-    approved:     bool
-    confidence:   int       # 40–90
-    reason:       str       # PT-BR, 2 frases
-    risk_note:    str       # PT-BR, 1 frase
-    context_tags: List[str]
-    used_ai:      bool = True
-    latency_ms:   float = 0.0
+class DedupEntry:
+    symbol:        str
+    direction:     str
+    last_sent_ts:  float      # unix epoch
+    last_score:    float
+    send_count:    int
 
-    @classmethod
-    def fallback(cls, symbol: str, direction: str, reason: str = "") -> "AIAnalysis":
-        return cls(
+
+# ---------------------------------------------------------------------------
+# DedupStore
+# ---------------------------------------------------------------------------
+
+class AlertDedupStore:
+    """
+    Deduplication store backed by PostgreSQL table `alert_dedup`.
+    Falls back to in-memory only if DB is unavailable.
+    """
+
+    def __init__(self) -> None:
+        self._cache: Dict[str, DedupEntry] = {}
+
+    # ------------------------------------------------------------------
+    # Schema bootstrap (called once at startup)
+    # ------------------------------------------------------------------
+
+    async def ensure_table(self) -> None:
+        sql = """
+        CREATE TABLE IF NOT EXISTS alert_dedup (
+            key            VARCHAR(120) PRIMARY KEY,
+            symbol         VARCHAR(20)  NOT NULL,
+            direction      VARCHAR(10)  NOT NULL,
+            last_sent_ts   DOUBLE PRECISION NOT NULL,
+            last_score     NUMERIC(6,2) NOT NULL,
+            send_count     INTEGER      NOT NULL DEFAULT 1,
+            updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_dedup_symbol ON alert_dedup (symbol);
+        """
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(sql)
+            log.info("DB_RECOVERED", "alert_dedup table verified", db_status="UP")
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"could not create alert_dedup table: {exc}", db_status="DOWN")
+
+    # ------------------------------------------------------------------
+    # Core decision
+    # ------------------------------------------------------------------
+
+    async def should_send(
+        self,
+        symbol:    str,
+        direction: str,
+        score:     float,
+    ) -> Tuple[bool, str]:
+        """
+        Returns (should_send: bool, reason: str).
+        Reasons: COOLDOWN | SCORE_DELTA_OVERRIDE | NEW | COOLDOWN_ACTIVE
+        """
+        key   = _make_key(symbol, direction)
+        entry = await self._load(key)
+
+        if entry is None:
+            log.info(
+                "ALERT_SENT",
+                f"novo alerta {key} — enviando",
+                symbol=symbol, direction=direction, score=score,
+            )
+            return True, "NEW"
+
+        now = time.time()
+            
+        elapsed = now - entry.last_sent_ts
+        delta   = score - entry.last_score
+
+        # Score delta override
+        if delta >= SCORE_DELTA_OVERRIDE:
+            log.info(
+                "ALERT_SENT",
+                f"score delta override {key}: Δ{delta:.1f} (prev={entry.last_score:.1f} now={score:.1f})",
+                symbol=symbol, direction=direction, score=score,
+            )
+            await write_system_event(
+                "ALERT_SENT",
+                f"score delta override: {symbol} {direction} Δ{delta:.1f}",
+                level="INFO", module="alerts_dedup",
+                symbol=symbol, direction=direction, score=score,
+            )
+            return True, "SCORE_DELTA_OVERRIDE"
+
+        # Still in cooldown
+        if elapsed < COOLDOWN_SECONDS:
+            remaining = int(COOLDOWN_SECONDS - elapsed)
+            log.info(
+                "ALERT_SUPPRESSED",
+                f"cooldown active {key}: {remaining}s remaining, score={score:.1f}",
+                symbol=symbol, direction=direction, score=score,
+            )
+            await write_system_event(
+                "ALERT_SUPPRESSED",
+                f"cooldown active for {symbol} {direction} ({remaining}s left)",
+                level="INFO", module="alerts_dedup",
+                symbol=symbol, direction=direction, score=score,
+            )
+            return False, "COOLDOWN_ACTIVE"
+
+        # Cooldown expired
+        log.info(
+            "ALERT_SENT",
+            f"cooldown expired {key} — sending",
+            symbol=symbol, direction=direction, score=score,
+        )
+        return True, "COOLDOWN_EXPIRED"
+
+    async def record_sent(
+        self,
+        symbol:    str,
+        direction: str,
+        score:     float,
+    ) -> None:
+        """Persist a sent-alert record."""
+        key = _make_key(symbol, direction)
+        now = time.time()
+        existing = await self._load(key)
+        count = (existing.send_count + 1) if existing else 1
+
+        entry = DedupEntry(
             symbol=symbol,
             direction=direction,
-            approved=False,
-            confidence=40,
-            reason=reason or "Análise de IA indisponível — sinal requer revisão manual",
-            risk_note="Sem validação de IA - gerencie o risco com stop loss",
-            context_tags=["sem_ia"],
-            used_ai=False,
+            last_sent_ts=now,
+            last_score=score,
+            send_count=count,
         )
+        self._cache[key] = entry
+        await self._persist(key, entry)
+
+    # ------------------------------------------------------------------
+    # DB I/O
+    # ------------------------------------------------------------------
+
+    async def _load(self, key: str) -> Optional[DedupEntry]:
+        # Fast-path: in-memory
+        if key in self._cache:
+            return self._cache[key]
+
+        # DB load
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT symbol, direction, last_sent_ts, last_score, send_count "
+                    "FROM alert_dedup WHERE key = $1",
+                    key,
+                )
+            if row:
+                entry = DedupEntry(
+                    symbol=row["symbol"],
+                    direction=row["direction"],
+                    last_sent_ts=float(row["last_sent_ts"]),
+                    last_score=float(row["last_score"]),
+                    send_count=int(row["send_count"]),
+                )
+                self._cache[key] = entry
+                return entry
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"dedup load failed: {exc}", db_status="DOWN")
+        return None
+
+    async def _persist(self, key: str, entry: DedupEntry) -> None:
+        sql = """
+            INSERT INTO alert_dedup (key, symbol, direction, last_sent_ts, last_score, send_count, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (key) DO UPDATE
+                SET last_sent_ts = EXCLUDED.last_sent_ts,
+                    last_score   = EXCLUDED.last_score,
+                    send_count   = EXCLUDED.send_count,
+                    updated_at   = NOW()
+        """
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    sql, key, entry.symbol, entry.direction,
+                    entry.last_sent_ts, entry.last_score, entry.send_count,
+                )
+        except Exception as exc:
+            log.error("DB_CONNECT_FAIL", f"dedup persist failed: {exc}", db_status="DOWN")
 
 
-# ---------------------------------------------------------------------------
-# Prompt
-# ---------------------------------------------------------------------------
-
-def _build_prompt(data: dict) -> str:
-    symbol     = data.get("symbol", "?")
-    direction  = data.get("direction", "LONG")
-    score      = data.get("score", 0)
-    regime     = data.get("btc_regime", "UNKNOWN")
-    funding    = data.get("funding_rate_8h", 0)
-    oi_change  = data.get("oi_change_pct", 0)
-    rsi        = data.get("rsi", 50)
-    news       = data.get("news_headline", "sem notícias recentes")
-    macro      = data.get("macro_bias", "NEUTRO")
-    ev         = data.get("ev_score", 50)
-    crowded    = data.get("is_crowded", False)
-    dominant   = data.get("dominant_component", "")
-    vol_label  = data.get("volume_label", "QUIET")
-    sector     = data.get("sector", "")
-
-    direction_pt = "COMPRA (LONG)" if direction == "LONG" else "VENDA (SHORT)"
-    crowded_note = "\n⚠️ ATENÇÃO: Setup 'crowded trade' detectado" if crowded else ""
-
-    return f"""Você é um analista sênior de crypto. Analise este setup e responda APENAS com JSON válido, sem texto adicional.
-
-SETUP:
-- Ativo: {symbol}/USDT — Direção: {direction_pt}
-- Score quantitativo: {score:.0f}/100
-- Componente dominante: {dominant}
-- Regime BTC: {regime}
-- RSI estimado: {rsi:.0f}
-- Funding rate (8h): {funding*100:.4f}%
-- Variação de OI: {oi_change:+.1f}%
-- Volume: {vol_label}
-- Valor esperado (EV): {ev:.0f}/100
-- Setor: {sector}
-- Notícia: {news[:120]}
-- Macro: {macro}{crowded_note}
-
-Responda SOMENTE com este JSON (sem markdown):
-{{
-  "approve": true,
-  "confidence": 72,
-  "reason": "motivo principal em PT-BR, máximo 2 frases",
-  "risk_note": "principal risco em PT-BR, máximo 1 frase",
-  "context_tags": ["tag1", "tag2"]
-}}
-
-Tags: momentum_real, funding_trap, oi_divergencia, crowded_long, volume_confirmado, squeeze_risco, tendencia_forte, mean_reversion, breakout, narrativa_quente, macro_favoravel, macro_desfavoravel
-
-Regras:
-- approve=false se funding_trap + preço parado, ou crowded + sem volume
-- confidence entre 40-90
-- reason: direto, em português
-- risk_note: 1 frase, em português"""
-
-
-# ---------------------------------------------------------------------------
-# Chamada Groq API
-# ---------------------------------------------------------------------------
-
-async def _call_groq(prompt: str, api_key: str) -> Optional[dict]:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type":  "application/json",
-    }
-    body = {
-        "model":       AI_MODEL,
-        "max_tokens":  AI_MAX_TOKENS,
-        "temperature": 0.3,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                GROQ_API_URL,
-                headers=headers,
-                json=body,
-                timeout=aiohttp.ClientTimeout(total=AI_TIMEOUT_S),
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    log.warning("AI_API_ERROR", f"Groq erro {resp.status}: {text[:200]}")
-                    return None
-                data = await resp.json()
-                raw  = data["choices"][0]["message"]["content"].strip()
-                # Strip markdown if model adds it
-                if raw.startswith("```"):
-                    raw = raw.split("```")[1]
-                    if raw.startswith("json"):
-                        raw = raw[4:]
-                    raw = raw.strip()
-                return json.loads(raw)
-
-    except json.JSONDecodeError as exc:
-        log.warning("AI_PARSE_ERROR", f"resposta não é JSON: {exc}")
-    except Exception as exc:
-        log.warning("AI_API_ERROR", f"Groq falhou: {exc}")
-    return None
-
-
-# ---------------------------------------------------------------------------
-# AIAnalyst
-# ---------------------------------------------------------------------------
-
-class AIAnalyst:
-    def __init__(self) -> None:
-        self._api_key = os.getenv("GROQ_API_KEY", "")
-        self._enabled = bool(self._api_key)
-        update_quality(ai_available=self._enabled)
-        if self._enabled:
-            log.info("SYSTEM_READY", f"AI Analyst pronto — Groq {AI_MODEL}")
-        else:
-            log.warning("AI_DISABLED", "GROQ_API_KEY não configurada — AI Analyst desabilitado")
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    async def analyze(
-        self,
-        symbol:             str,
-        direction:          str,
-        score:              float,
-        components:         dict,
-        regime:             str,
-        funding_8h:         float,
-        oi_score:           float,
-        ev_score:           float,
-        is_crowded:         bool,
-        dominant_component: str,
-        vol_label:          str,
-        sector:             str,
-        news_headline:      str = "",
-        macro_bias:         str = "NEUTRO",
-    ) -> AIAnalysis:
-        if not self._enabled:
-            return AIAnalysis.fallback(symbol, direction, "GROQ_API_KEY não configurada")
-
-        # Cooldown por símbolo
-        if time.time() - _last_call.get(symbol, 0) < AI_CALL_COOLDOWN:
-            return AIAnalysis.fallback(symbol, direction, "Análise recente — reutilizando")
-
-        t0 = time.monotonic()
-
-        # Estimar RSI a partir do componente
-        rsi_score = components.get("rsi_quality", 50)
-        rsi_est   = 55 if rsi_score >= 80 else (65 if rsi_score >= 60 else (45 if rsi_score >= 40 else 30))
-
-        data = {
-            "symbol":             symbol,
-            "direction":          direction,
-            "score":              score,
-            "btc_regime":         regime,
-            "funding_rate_8h":    funding_8h,
-            "oi_change_pct":      (oi_score - 50) / 2,
-            "rsi":                rsi_est,
-            "news_headline":      news_headline or "sem notícias recentes",
-            "macro_bias":         macro_bias,
-            "ev_score":           ev_score,
-            "is_crowded":         is_crowded,
-            "dominant_component": dominant_component,
-            "volume_label":       vol_label,
-            "sector":             sector,
-        }
-
-        result  = await _call_groq(_build_prompt(data), self._api_key)
-        latency = round((time.monotonic() - t0) * 1000, 1)
-        _last_call[symbol] = time.time()
-
-        if result is None:
-            log.warning("AI_ANALYSIS_FAIL", f"Groq falhou para {symbol} — fallback")
-            return AIAnalysis.fallback(symbol, direction)
-
-        approved   = bool(result.get("approve", True))
-        confidence = max(40, min(90, int(result.get("confidence", 60))))
-        reason     = result.get("reason", "")[:200]
-        risk_note  = result.get("risk_note", "Gerencie com stop loss")[:150]
-        tags       = result.get("context_tags", [])[:5]
-
-        log.info(
-            "AI_ANALYSIS_DONE",
-            f"AI {symbol} {direction}: aprovado={approved} confiança={confidence} {latency}ms",
-            symbol=symbol, direction=direction, score=confidence, latency_ms=latency,
-        )
-        return AIAnalysis(
-            symbol=symbol, direction=direction,
-            approved=approved, confidence=confidence,
-            reason=reason, risk_note=risk_note,
-            context_tags=tags, used_ai=True, latency_ms=latency,
-        )
-
-    async def analyze_batch(
-        self,
-        candidates:  list,
-        meta_map:    dict = None,
-        news_map:    dict = None,
-        macro_bias:  str  = "NEUTRO",
-        crowd_map:   dict = None,
-        vol_map:     dict = None,
-        sector_map:  dict = None,
-    ) -> Dict[str, AIAnalysis]:
-        import asyncio
-        tasks = {}
-        for sig in candidates:
-            sym      = sig.symbol
-            meta     = (meta_map or {}).get(sym)
-            news_ctx = (news_map or {}).get(sym)
-            crowd    = (crowd_map or {}).get(sym)
-            vol      = (vol_map or {}).get(sym)
-            tasks[sym] = self.analyze(
-                symbol=sym,
-                direction=sig.direction,
-                score=sig.score,
-                components=sig.components,
-                regime=getattr(getattr(sig, 'result', None), 'regime_used', "UNKNOWN"),
-                funding_8h=meta.funding_8h if meta else 0.0,
-                oi_score=sig.components.get("oi_acceleration", 50),
-                ev_score=getattr(sig, 'ev_score', sig.score),
-                is_crowded=getattr(crowd, 'is_crowded', False),
-                dominant_component=getattr(getattr(sig, 'result', None), 'dominant_component', ""),
-                vol_label=getattr(vol, 'label', "QUIET"),
-                sector=(sector_map or {}).get(sym, ""),
-                news_headline=news_ctx.top_headline if news_ctx and news_ctx.top_headline != "No recent news" else "",
-                macro_bias=macro_bias,
-            )
-        results = await asyncio.gather(*tasks.values(), return_exceptions=False)
-        return dict(zip(tasks.keys(), results))
+def _make_key(symbol: str, direction: str) -> str:
+    return f"{symbol.upper()}:{direction.upper()}"

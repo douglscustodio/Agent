@@ -886,17 +886,27 @@ class JarvisChatbot:
         try:
             log.info("CHATBOT_SCAN", "Starting scan from chatbot command")
             ranking = await scan_fn()
-            log.info("CHATBOT_SCAN", f"Scan completed, signals: {len(ranking.top) if ranking and ranking.top else 0}")
+            log.info("CHATBOT_SCAN", f"Scan completed: scored={ranking.total_scored if ranking else 0}, valid={ranking.total_valid if ranking else 0}, top={len(ranking.top) if ranking and ranking.top else 0}")
             
             if ranking and ranking.top:
                 count = len(ranking.top)
-                lines = [f"✅ *Scan Completo*\n\n{count} sinal(ais) encontrado(s):\n"]
+                lines = [f"✅ *Sinais Encontrados*\n\n"]
                 for sig in ranking.top[:3]:
                     emoji = "📈" if sig.direction == "LONG" else "📉"
-                    lines.append(f"{emoji} {sig.symbol}/USDT ({sig.direction}) — Score: `{sig.score:.0f}`")
+                    band_emoji = "🔥" if "HIGH" in str(sig.band) else "✅"
+                    lines.append(f"{emoji} {sig.symbol}/USDT {band_emoji}\n   {sig.direction} | Score: `{sig.score:.0f}`")
+                    if hasattr(sig, 'components') and sig.components:
+                        lines.append(f"   RS={sig.components.get('relative_strength',0):.0f} ADX={sig.components.get('adx_regime',0):.0f}")
+                    lines.append("")
                 return "\n".join(lines)
             else:
-                return "✅ *Scan Completo*\n\nNenhum sinal válido encontrado.\nMotivo: condições de mercado não favoráveis ou dados indisponíveis.\n\nUse /debug para diagnóstico."
+                details = []
+                if ranking:
+                    details.append(f"Scored: {ranking.total_scored}")
+                    details.append(f"Valid: {ranking.total_valid}")
+                    details.append(f"Watchlist: {len(ranking.watchlist) if ranking.watchlist else 0}")
+                    details.append(f"Rejected: {len(ranking.rejected) if ranking.rejected else 0}")
+                return "⚡ *Scan*\n\nNenhum sinal encontrado.\n\n" + "\n".join(details) if details else ""
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"scan error: {exc}")
             return f"⚡ *Scan*\n\nErro ao executar scan: {exc}\n\nUse /debug para diagnóstico completo."

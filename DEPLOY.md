@@ -1,4 +1,4 @@
-# 🚀 Guia de Deploy - Jarvis AI Trading Monitor
+#  Guia de Deploy - Jarvis AI Trading Monitor
 
 Este guia explica como colocar o Jarvis para rodar 24/7 em diferentes plataformas.
 
@@ -322,4 +322,4 @@ Após deploy:
 
 ---
 
-Boa sorte com seus trades! 🚀
+Boa sorte com seus trades! 

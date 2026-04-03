@@ -242,9 +242,9 @@ def rank_signals(
 
 def format_ranking_summary(result: RankingResult) -> str:
     lines = [
-        f"📊 Scan complete — {result.total_scored} symbols scored",
-        f"✅ Valid: {result.total_valid}  |  👀 Watchlist: {len(result.watchlist)}  |  ❌ Rejected: {len(result.rejected)}",
-        f"🗂  Sectors: {', '.join(result.sectors_hit) if result.sectors_hit else 'none'}",
+        f"[STAT] Scan complete — {result.total_scored} symbols scored",
+        f"[OK] Valid: {result.total_valid}  |  [WATCH] Watchlist: {len(result.watchlist)}  |  [FAIL] Rejected: {len(result.rejected)}",
+        f"[FOLDER]  Sectors: {', '.join(result.sectors_hit) if result.sectors_hit else 'none'}",
         "",
     ]
     if not result.top:
@@ -252,10 +252,10 @@ def format_ranking_summary(result: RankingResult) -> str:
         return "\n".join(lines)
 
     for r in result.top:
-        band_emoji = "🔥" if r.band == ScoreBand.HIGH_CONVICTION else "✅"
+        band_emoji = "[HOT]" if r.band == ScoreBand.HIGH_CONVICTION else "[OK]"
         sector = SECTOR_MAP.get(r.symbol, r.symbol)
         penalty_note = (
-            f"  ⚠️ corr-penalized→{r.penalized_score:.0f}"
+            f"  [WARN] corr-penalized→{r.penalized_score:.0f}"
             if r.penalized_score < r.score else ""
         )
         lines.append(
@@ -270,7 +270,7 @@ def format_ranking_summary(result: RankingResult) -> str:
             f"OI={r.components.get('oi_acceleration',0):.0f}  "
             f"BB={r.components.get('bb_squeeze',0):.0f}  "
             f"ATR={r.components.get('atr_quality',0):.0f}  "
-            f"⭐{r.dominant}"
+            f"{r.dominant}"
         )
         lines.append("")
 

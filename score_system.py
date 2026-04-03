@@ -241,7 +241,7 @@ class ScoreSystem:
         if direction == "LONG":
             if funding_pct > 0.1:
                 breakdown.funding = -self.MAX_FUNDING
-                warnings.append(f"⚠️ FUNDING EXTREMO ({funding_pct:.2f}%) - risco long squeeze!")
+                warnings.append(f"[WARN] FUNDING EXTREMO ({funding_pct:.2f}%) - risco long squeeze!")
             elif funding_pct > 0.03:
                 breakdown.funding = -self.MAX_FUNDING * 0.5
                 warnings.append(f"Funding alto ({funding_pct:.2f}%)")
@@ -254,7 +254,7 @@ class ScoreSystem:
         else:  # SHORT
             if funding_pct < -0.1:
                 breakdown.funding = -self.MAX_FUNDING
-                warnings.append(f"⚠️ FUNDING EXTREMO ({funding_pct:.2f}%) - risco short squeeze!")
+                warnings.append(f"[WARN] FUNDING EXTREMO ({funding_pct:.2f}%) - risco short squeeze!")
             elif funding_pct < -0.03:
                 breakdown.funding = -self.MAX_FUNDING * 0.5
                 warnings.append(f"Funding muito baixo ({funding_pct:.2f}%)")
@@ -331,7 +331,7 @@ class ScoreSystem:
         if strength == SignalStrength.WAIT:
             return "WAIT"
         
-        if warnings and any("⚠️" in w for w in warnings):
+        if warnings and any("[WARN]" in w for w in warnings):
             return "REDUCE_SIZE"
         
         if strength == SignalStrength.WATCH:
@@ -362,20 +362,20 @@ class ScoreSystem:
     def get_score_color(self, score: float) -> str:
         """Retorna emoji baseado no score."""
         if score >= 75:
-            return "🟢"
+            return "[GREEN]"
         elif score >= 50:
-            return "🟡"
+            return "[YELLOW]"
         elif score >= 30:
-            return "⚠️"
+            return "[WARN]"
         else:
-            return "🔴"
+            return "[RED]"
 
 
 def format_signal_message(decision: SignalDecision) -> str:
     """Formata mensagem do sinal para display."""
     color = ScoreSystem().get_score_color(decision.score)
     
-    emoji_dir = "📈" if decision.direction == "LONG" else "📉"
+    emoji_dir = "[UP]" if decision.direction == "LONG" else "[DOWN]"
     
     lines = [
         f"{emoji_dir} *{decision.symbol}/USDT*",
@@ -388,13 +388,13 @@ def format_signal_message(decision: SignalDecision) -> str:
     ]
     
     if decision.reasons:
-        lines.append("*✅ Motivos:*")
+        lines.append("*[OK] Motivos:*")
         for r in decision.reasons[:3]:
             lines.append(f"  • {r}")
         lines.append("")
     
     if decision.warnings:
-        lines.append("*⚠️ Cuidados:*")
+        lines.append("*[WARN] Cuidados:*")
         for w in decision.warnings[:3]:
             lines.append(f"  • {w}")
         lines.append("")

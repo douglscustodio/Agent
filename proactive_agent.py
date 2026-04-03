@@ -513,7 +513,7 @@ class ProactiveAgent:
             sym_wr = best_conditions.get("best_symbol_wr", 0)
             if best_conditions.get("best_symbol") == symbol and sym_wr > 50:
                 confidence_bonus += 15
-                reason_parts.append(f"✅ {symbol} tem histórico bom ({sym_wr:.0f}% win rate)")
+                reason_parts.append(f"[OK] {symbol} tem histórico bom ({sym_wr:.0f}% win rate)")
             
             hour_wr = best_conditions.get("best_hour_wr", 0)
             if best_conditions.get("best_hour") == current_hour_key and hour_wr > 50:
@@ -522,11 +522,11 @@ class ProactiveAgent:
             
             regime_wr = best_conditions.get("best_regime_wr", 0)
             if best_conditions.get("best_regime"):
-                reason_parts.append(f"📊 Regime: {best_conditions.get('best_regime')} ({regime_wr:.0f}% win rate)")
+                reason_parts.append(f"[STAT] Regime: {best_conditions.get('best_regime')} ({regime_wr:.0f}% win rate)")
             
             adjusted_score = min(100, score + confidence_bonus)
             
-            emoji_dir = "📈" if direction == "LONG" else "📉"
+            emoji_dir = "[UP]" if direction == "LONG" else "[DOWN]"
             
             suggestion_text = (
                 f"{emoji_dir} *SUGESTÃO: {symbol}/USDT*\n"
@@ -538,11 +538,11 @@ class ProactiveAgent:
         if suggestions:
             overall_wr = best_conditions.get("overall_wr", 0)
             intro = (
-                f"🧠 *MINHA ANÁLISE APRENDIDA*\n"
+                f" *MINHA ANÁLISE APRENDIDA*\n"
                 f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_\n\n"
-                f"📈 Win rate geral: `{overall_wr:.1f}%`\n"
-                f"📈 WIN LONGs: `{best_conditions.get('long_wr', 0):.1f}%` | "
-                f"📉 WIN SHORTs: `{best_conditions.get('short_wr', 0):.1f}%`\n\n"
+                f"[UP] Win rate geral: `{overall_wr:.1f}%`\n"
+                f"[UP] WIN LONGs: `{best_conditions.get('long_wr', 0):.1f}%` | "
+                f"[DOWN] WIN SHORTs: `{best_conditions.get('short_wr', 0):.1f}%`\n\n"
                 f"Oportunidades que identifico:\n"
             )
             return intro + "\n\n".join(suggestions)
@@ -560,12 +560,12 @@ class ProactiveAgent:
 
 def format_market_pulse_message(pulse: MarketPulse) -> str:
     lines = [
-        "📊 *PULSO DO MERCADO*",
+        "[STAT] *PULSO DO MERCADO*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
     ]
     
-    emoji = "🟢" if pulse.sentiment == "bullish" else ("🔴" if pulse.sentiment == "bearish" else "⚪")
+    emoji = "[GREEN]" if pulse.sentiment == "bullish" else ("[RED]" if pulse.sentiment == "bearish" else "[NEUTRAL]")
     sentiment_pt = {
         "bullish": "ALTISTA", "bearish": "BAIXISTA", "neutral": "NEUTRO"
     }.get(pulse.sentiment, "NEUTRO")
@@ -574,42 +574,42 @@ def format_market_pulse_message(pulse: MarketPulse) -> str:
     lines.append(f"*BTC:* `${pulse.btc_price:,.2f}` ({pulse.btc_change_1h:+.2f}%)")
     
     regime_pt = {
-        "TRENDING": "📈 Em Tendência",
-        "RANGING": "↔️ Lateral",
-        "WEAK": "🔄 Fraco",
-    }.get(pulse.regime, "❓ Indefinido")
+        "TRENDING": "[UP] Em Tendência",
+        "RANGING": "↔ Lateral",
+        "WEAK": " Fraco",
+    }.get(pulse.regime, " Indefinido")
     
     dir_pt = {
-        "UP": "Para cima ⬆️",
-        "DOWN": "Para baixo ⬇️",
-        "NEUTRAL": "Sem direção ➡️",
-    }.get(pulse.regime_direction, "➡️")
+        "UP": "Para cima ",
+        "DOWN": "Para baixo ",
+        "NEUTRAL": "Sem direção ",
+    }.get(pulse.regime_direction, "")
     
     lines.append(f"*Regime:* {regime_pt}")
     lines.append(f"*Direção:* {dir_pt}")
     lines.append(f"*Força:* `{pulse.regime_strength:.1f}`")
     
-    risk_emoji = "🔴" if pulse.risk_level == "HIGH" else ("🟡" if pulse.risk_level == "MEDIUM" else "🟢")
+    risk_emoji = "[RED]" if pulse.risk_level == "HIGH" else ("[YELLOW]" if pulse.risk_level == "MEDIUM" else "[GREEN]")
     lines.append(f"*Risco:* {risk_emoji} {pulse.risk_level}")
     
     if pulse.funding_alerts:
         lines.append("")
-        lines.append("*⚠️ Funding Extremo:*")
+        lines.append("*[WARN] Funding Extremo:*")
         for fa in pulse.funding_alerts[:2]:
             lines.append(f"• {fa['symbol']}: {fa['rate']*100:.2f}% (risco squeeze)")
     
     lines.append("")
     
     if pulse.notable_news:
-        lines.append("*📰 Destaque:*")
+        lines.append("*[NEWS] Destaque:*")
         for news in pulse.notable_news[:2]:
             lines.append(f"• {news}...")
         lines.append("")
     
     if pulse.top_opportunities:
-        lines.append("*🎯 Oportunidades:*")
+        lines.append("*[TARGET] Oportunidades:*")
         for opp in pulse.top_opportunities[:2]:
-            emoji_dir = "📈" if opp["direction"] == "LONG" else "📉"
+            emoji_dir = "[UP]" if opp["direction"] == "LONG" else "[DOWN]"
             lines.append(f"• {emoji_dir} {opp['symbol']} {opp['direction']} — Score {opp['score']:.0f}")
         lines.append("")
     elif pulse.hot_sectors:
@@ -617,7 +617,7 @@ def format_market_pulse_message(pulse: MarketPulse) -> str:
         lines.append("")
     
     if pulse.macro_events:
-        lines.append("*🌍 Macro:*")
+        lines.append("*[WORLD] Macro:*")
         for event in pulse.macro_events[:2]:
             lines.append(f"• {event}...")
         lines.append("")
@@ -628,15 +628,15 @@ def format_market_pulse_message(pulse: MarketPulse) -> str:
 
 def format_regime_change_message(new_regime: str, direction: str, strength: float, previous: str) -> str:
     regime_pt = {
-        "TRENDING": "📈 TENDÊNCIA ESTABELECIDA",
-        "RANGING": "↔️ MERCADO LATERAL",
-        "WEAK": "🔄 TENDÊNCIA FRACA",
+        "TRENDING": "[UP] TENDÊNCIA ESTABELECIDA",
+        "RANGING": "↔ MERCADO LATERAL",
+        "WEAK": " TENDÊNCIA FRACA",
     }.get(new_regime, new_regime)
     
     dir_pt = {
-        "UP": "Para cima ⬆️",
-        "DOWN": "Para baixo ⬇️",
-        "NEUTRAL": "Sem direção clara ➡️",
+        "UP": "Para cima ",
+        "DOWN": "Para baixo ",
+        "NEUTRAL": "Sem direção clara ",
     }.get(direction, direction)
     
     previous_pt = {
@@ -644,7 +644,7 @@ def format_regime_change_message(new_regime: str, direction: str, strength: floa
     }.get(previous, previous)
     
     lines = [
-        "⚡ *MUDANÇA DE REGIME DETECTADA!*",
+        " *MUDANÇA DE REGIME DETECTADA!*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
         f"*De:* Mercado {previous_pt}",
@@ -655,17 +655,17 @@ def format_regime_change_message(new_regime: str, direction: str, strength: floa
     ]
     
     if new_regime == "TRENDING":
-        lines.append("💡 *O que fazer:*")
+        lines.append("[IDEA] *O que fazer:*")
         lines.append("• Trades com tendência têm mais chance de sucesso")
         lines.append("• Procure confirmações no sentido da tendência")
         lines.append("• Stops mais apertados podem funcionar")
     elif new_regime == "RANGING":
-        lines.append("💡 *O que fazer:*")
+        lines.append("[IDEA] *O que fazer:*")
         lines.append("• Mercados laterais pedem paciência")
         lines.append("• Procure setups em extremos do range")
         lines.append("• Considere estratégias de range-bound")
     else:
-        lines.append("💡 *O que fazer:*")
+        lines.append("[IDEA] *O que fazer:*")
         lines.append("• Mercado sem direção clara")
         lines.append("• Reduza tamanho de posições")
         lines.append("• Aguarde confirmação")
@@ -676,7 +676,7 @@ def format_regime_change_message(new_regime: str, direction: str, strength: floa
 
 
 def format_important_news_alert(title: str, sentiment: str, url: str = "") -> str:
-    emoji = "🟢" if sentiment == "positive" else ("🔴" if sentiment == "negative" else "⚪")
+    emoji = "[GREEN]" if sentiment == "positive" else ("[RED]" if sentiment == "negative" else "[NEUTRAL]")
     translated_title = _translate_news_title(title)
     
     lines = [
@@ -687,7 +687,7 @@ def format_important_news_alert(title: str, sentiment: str, url: str = "") -> st
     ]
     
     if url:
-        lines.append(f"[Ver详情]({url})")
+        lines.append(f"[Ver]({url})")
     
     lines.append("")
     lines.append("_Jarvis AI Trading Monitor_")
@@ -695,7 +695,7 @@ def format_important_news_alert(title: str, sentiment: str, url: str = "") -> st
 
 
 def format_volatility_alert(symbol: str, direction: str, change_pct: float, reason: str = "") -> str:
-    emoji = "🚀" if change_pct > 0 else "💥"
+    emoji = "" if change_pct > 0 else ""
     
     lines = [
         f"{emoji} *MOVIMENTO BRUSCO — {symbol}*",
@@ -709,7 +709,7 @@ def format_volatility_alert(symbol: str, direction: str, change_pct: float, reas
         lines.append(f"*Motivo:* {reason}")
     
     lines.append("")
-    lines.append("💡 Verifique seu stop loss e gestão de risco!")
+    lines.append("[IDEA] Verifique seu stop loss e gestão de risco!")
     lines.append("")
     lines.append("_Jarvis AI Trading Monitor_")
     return "\n".join(lines)
@@ -717,7 +717,7 @@ def format_volatility_alert(symbol: str, direction: str, change_pct: float, reas
 
 def format_funding_alert(symbol: str, funding_rate: float, direction: str = "LONG") -> str:
     lines = [
-        "⚠️ *FUNDING EXTREMO DETECTADO*",
+        "[WARN] *FUNDING EXTREMO DETECTADO*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
         f"*Ativo:* {symbol}",
@@ -726,24 +726,24 @@ def format_funding_alert(symbol: str, funding_rate: float, direction: str = "LON
     ]
     
     if funding_rate > 0.015:
-        lines.append("🔴 *EXTREMAMENTE ALTO*")
+        lines.append("[RED] *EXTREMAMENTE ALTO*")
         lines.append("• Risco muito alto de long squeeze")
         lines.append("• Evite entradas LONG")
         lines.append("• Se tem posição LONG, considere sair")
     elif funding_rate > 0.01:
-        lines.append("🟡 *MUITO ALTO*")
+        lines.append("[YELLOW] *MUITO ALTO*")
         lines.append("• Cuidado com posições LONG")
         lines.append("• Funding pode indicar reversão")
     
     lines.append("")
-    lines.append("💡 *Histórico:* Funding acima de 1% frequentemente precede squeeze")
+    lines.append("[IDEA] *Histórico:* Funding acima de 1% frequentemente precede squeeze")
     lines.append("")
     lines.append("_Jarvis AI Trading Monitor_")
     return "\n".join(lines)
 
 
 def format_exit_signal_alert(exit_signal: ExitSignal) -> str:
-    emoji = "🚨"
+    emoji = ""
     
     lines = [
         f"{emoji} *SINAL DE SAÍDA DETECTADO*",
@@ -753,19 +753,19 @@ def format_exit_signal_alert(exit_signal: ExitSignal) -> str:
         f"*Direção:* {exit_signal.direction}",
         f"*Tempo no trade:* {exit_signal.time_in_trade_hours:.1f}h",
         "",
-        "*⚠️ Motivos:*",
+        "*[WARN] Motivos:*",
         f"{exit_signal.reason}",
         "",
     ]
     
     if exit_signal.regime_changed:
-        lines.append("🔄 *Regime mudou* — estratégia original pode não funcionar mais")
+        lines.append(" *Regime mudou* — estratégia original pode não funcionar mais")
     
     if exit_signal.funding_extreme:
-        lines.append("💸 *Funding extremo* — risco de liquidação de longs")
+        lines.append(" *Funding extremo* — risco de liquidação de longs")
     
     lines.append("")
-    lines.append("💡 *Recomendação:*")
+    lines.append("[IDEA] *Recomendação:*")
     lines.append("• Reveja seu stop loss")
     lines.append("• Considere realização parcial")
     lines.append("• Aguarde confirmação antes de reentrar")
@@ -776,7 +776,7 @@ def format_exit_signal_alert(exit_signal: ExitSignal) -> str:
 
 def format_squeeze_warning(symbol: str, reasons: List[str]) -> str:
     lines = [
-        "⚠️ *AVISO: SQUEEZE DETECTADO*",
+        "[WARN] *AVISO: SQUEEZE DETECTADO*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
         f"*Ativo:* {symbol}",
@@ -788,7 +788,7 @@ def format_squeeze_warning(symbol: str, reasons: List[str]) -> str:
         lines.append(f"• {reason}")
     
     lines.append("")
-    lines.append("💡 *Recomendação:*")
+    lines.append("[IDEA] *Recomendação:*")
     lines.append("• Evite entradas na direção do funding alto")
     lines.append("• Se já tem posição, considere proteção adicional")
     lines.append("• Aguarde limpeza de posições antes de entrar")
@@ -802,14 +802,14 @@ def format_opportunity_summary(signals: List, news_map: dict = None) -> str:
         return ""
     
     lines = [
-        "🎯 *OPORTUNIDADES DO CICLO*",
+        "[TARGET] *OPORTUNIDADES DO CICLO*",
         f"_{datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}_",
         "",
     ]
     
     for sig in signals[:5]:
-        emoji_dir = "📈" if sig.direction == "LONG" else "📉"
-        band_emoji = "🔥" if "HIGH" in str(sig.band) else "✅"
+        emoji_dir = "[UP]" if sig.direction == "LONG" else "[DOWN]"
+        band_emoji = "[HOT]" if "HIGH" in str(sig.band) else "[OK]"
         
         lines.append(f"{emoji_dir} *{sig.symbol}/USDT* {band_emoji}")
         lines.append(f"   Direção: {sig.direction} | Score: `{sig.score:.0f}/100`")
@@ -819,7 +819,7 @@ def format_opportunity_summary(signals: List, news_map: dict = None) -> str:
             if news_ctx and news_ctx.articles:
                 title = news_ctx.articles[0].title[:50]
                 translated_title = _translate_news_title(title)
-                lines.append(f"   📰 {translated_title}...")
+                lines.append(f"   [NEWS] {translated_title}...")
         lines.append("")
     
     lines.append("_Use /sinais para detalhes completos_")
@@ -836,21 +836,21 @@ def format_performance_dashboard(stats: dict, period: str = "24h") -> str:
     best = stats.get("best_trade", 0.0)
     worst = stats.get("worst_trade", 0.0)
     
-    win_emoji = "🟢" if win_rate >= 60 else ("🟡" if win_rate >= 40 else "🔴")
+    win_emoji = "[GREEN]" if win_rate >= 60 else ("[YELLOW]" if win_rate >= 40 else "[RED]")
     
     lines = [
-        "📈 *DASHBOARD DE PERFORMANCE*",
+        "[UP] *DASHBOARD DE PERFORMANCE*",
         f"_{period}_",
         "",
         f"*Total de Sinais:* `{total}`",
         "",
-        "*📊 Taxa de Acerto:*",
+        "*[STAT] Taxa de Acerto:*",
         f"{win_emoji} `{win_rate:.1f}%`",
-        f"✅ Acertos (TP1): `{tp1}`",
-        f"❌ Erros (SL): `{sl}`",
-        f"➖ Neutros: `{neutral}`",
+        f"[OK] Acertos (TP1): `{tp1}`",
+        f"[FAIL] Erros (SL): `{sl}`",
+        f" Neutros: `{neutral}`",
         "",
-        "*💰 PnL:*",
+        "*[MONEY] PnL:*",
         f"Média: `{avg_pnl:+.2f}%`",
         f"Melhor: `{best:+.2f}%`" if best else "",
         f"Pior: `{worst:+.2f}%`" if worst else "",
@@ -859,11 +859,11 @@ def format_performance_dashboard(stats: dict, period: str = "24h") -> str:
     
     if total > 0:
         if win_rate >= 65:
-            lines.append("🟢 *Excelente!* Sistema performing acima da média")
+            lines.append("[GREEN] *Excelente!* Sistema performing acima da média")
         elif win_rate >= 50:
-            lines.append("🟡 *Bom!* Continue assim")
+            lines.append("[YELLOW] *Bom!* Continue assim")
         else:
-            lines.append("🔴 *Atenção:* Taxa de acerto abaixo de 50%")
+            lines.append("[RED] *Atenção:* Taxa de acerto abaixo de 50%")
             lines.append("• Sistema pode precisar de ajustes")
             lines.append("• Verifique contexto macro")
     
@@ -879,7 +879,7 @@ def format_sentiment_summary(
     market_sentiment: str,
     fear_greed_value: int = None,
 ) -> str:
-    emoji = "🟢" if market_sentiment == "bullish" else ("🔴" if market_sentiment == "bearish" else "⚪")
+    emoji = "[GREEN]" if market_sentiment == "bullish" else ("[RED]" if market_sentiment == "bearish" else "[NEUTRAL]")
     
     sentiment_pt = {
         "bullish": "ALTISTA", "bearish": "BAIXISTA", "neutral": "NEUTRO"
@@ -898,7 +898,7 @@ def format_sentiment_summary(
     ]
     
     if fear_greed_value is not None:
-        fg_emoji = "🟢" if fear_greed_value >= 55 else ("🔴" if fear_greed_value <= 45 else "🟡")
+        fg_emoji = "[GREEN]" if fear_greed_value >= 55 else ("[RED]" if fear_greed_value <= 45 else "[YELLOW]")
         fg_label = "Medo" if fear_greed_value <= 40 else ("Ganância" if fear_greed_value >= 60 else "Neutro")
         lines.append("")
         lines.append(f"*Fear & Greed:* {fg_emoji} {fear_greed_value} ({fg_label})")
@@ -906,11 +906,11 @@ def format_sentiment_summary(
     lines.append("")
     
     if market_sentiment == "bullish" and btc_change_24h > 5:
-        lines.append("💡 Momento comprador forte — тенденция是你的朋友")
+        lines.append("[IDEA] Momento comprador forte — тенденция")
     elif market_sentiment == "bearish" and btc_change_24h < -5:
-        lines.append("💡 Pressão vendedora — cautela com entradas")
+        lines.append("[IDEA] Pressão vendedora — cautela com entradas")
     elif market_sentiment == "neutral":
-        lines.append("💡 Mercado indeciso — aguarde direção clara")
+        lines.append("[IDEA] Mercado indeciso — aguarde direção clara")
     
     lines.append("")
     lines.append("_Jarvis AI Trading Monitor_")

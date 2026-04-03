@@ -524,24 +524,10 @@ class JarvisChatbot:
     async def _cmd_start(self, chat_id: str, args: str) -> str:
         log.info("CHATBOT_START", f"start command from {chat_id}")
         
-        # Verificar configuração básica
-        import os
-        checks = []
-        if os.getenv("GROQ_API_KEY"):
-            checks.append("✅ GROQ_API_KEY configurada")
-        else:
-            checks.append("⚠️ GROQ_API_KEY não configurada")
-        
-        if os.getenv("TELEGRAM_BOT_TOKEN"):
-            checks.append("✅ Telegram configurado")
-        else:
-            checks.append("⚠️ Telegram não configurado")
-        
         return (
             "👋 *Bem-vindo ao Jarvis AI Trading Monitor!*\n\n"
             "Sou seu assistente pessoal de trading de criptomoedas.\n"
             "Estou monitorando o mercado 24/7 e te alertando sobre oportunidades.\n\n"
-            "*Configuração:*\n" + "\n".join(checks) + "\n\n"
             "*O que posso fazer:*\n"
             "📊 Analisar o mercado e identificar sinais de trade\n"
             "📰 Buscar as últimas notícias relevantes\n"

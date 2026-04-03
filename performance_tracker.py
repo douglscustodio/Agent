@@ -242,7 +242,7 @@ class PerformanceTracker:
                 )
                 await self._persist_record(record)
 
-                outcome_emoji = "✅" if outcome == Outcome.TP1 else ("❌" if outcome == Outcome.SL else "➖")
+                outcome_emoji = "[OK]" if outcome == Outcome.TP1 else ("[FAIL]" if outcome == Outcome.SL else "")
                 log.info(
                     "PERFORMANCE_LOGGED",
                     f"{outcome_emoji} {pending.symbol} {pending.direction} "

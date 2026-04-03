@@ -528,19 +528,16 @@ class JarvisChatbot:
             "👋 *Bem-vindo ao Jarvis AI Trading Monitor!*\n\n"
             "Sou seu assistente pessoal de trading de criptomoedas.\n"
             "Estou monitorando o mercado 24/7 e te alertando sobre oportunidades.\n\n"
-            "*O que posso fazer:*\n"
-            "📊 Analisar o mercado e identificar sinais de trade\n"
-            "📰 Buscar as últimas notícias relevantes\n"
-            "🌍 Acompanhar o contexto macroeconômico\n"
-            "🛡️ Gerenciar riscos da sua carteira\n"
-            "🤖 Responder suas perguntas sobre crypto\n\n"
-            "*Comece com:*\n"
-            "/debug — Diagnosticar o sistema\n"
-            "/status — Ver como o sistema está\n"
-            "/sinais — Ver oportunidades de trade\n"
-            "/help — Ver todos os comandos"
+            "*Comandos:*\n"
+            "📊 /sinais — Ver oportunidades de trade\n"
+            "📰 /news — Últimas notícias\n"
+            "🌍 /macro — Contexto macroeconômico\n"
+            "🛡️ /risk — Gerenciar riscos\n"
+            "🤖 /ai [pergunta] — Pergunte qualquer coisa\n"
+            "🔍 /status — Status do sistema\n"
+            "📊 /debug — Diagnóstico completo\n\n"
+            "_Use /help para ver todos os comandos_"
         )
-        return welcome
 
     async def _cmd_help(self, chat_id: str, args: str) -> str:
         return (

@@ -149,9 +149,21 @@ async def _fetch_yf(
             result = data["chart"]["result"][0]
             meta   = result["meta"]
             price  = float(meta.get("regularMarketPrice", 0))
-            prev   = float(meta.get("previousClose", price))
-            change = ((price - prev) / prev * 100) if prev > 0 else 0.0
-            trend  = "UP" if change > 0.3 else ("DOWN" if change < -0.3 else "FLAT")
+            
+            timestamps = result.get("timestamp", [])
+            closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            
+            change = 0.0
+            if len(timestamps) >= 2 and len(closes) >= 2:
+                prev_price = float(closes[-2]) if closes[-2] is not None else price
+                if prev_price > 0 and prev_price != price:
+                    change = ((price - prev_price) / prev_price * 100)
+            elif len(timestamps) >= 2:
+                prev = float(meta.get("previousClose", 0))
+                if prev > 0 and prev != price:
+                    change = ((price - prev) / prev * 100)
+            
+            trend = "UP" if change > 0.3 else ("DOWN" if change < -0.3 else "FLAT")
             return MarketData(
                 symbol=ticker, name=name,
                 price=price, change_pct=round(change, 2), trend=trend,

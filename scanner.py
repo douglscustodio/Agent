@@ -404,13 +404,12 @@ async def run_scan_cycle(
         log.info("NO_TRADE", "No signals above threshold - market conditions not favorable")
         return ranking
 
-    # Minimum average score threshold - signals below this won't be sent
-    avg_score = sum(s.total for s in ranking.top) / len(ranking.top) if ranking.top else 0
-    if avg_score < 35:
-        log.warning("NO_TRADE", f"Average score {avg_score:.0f} below minimum - skipping signals")
-        ranking.top = []
-        ranking.total_valid = 0
+    if not ranking.top:
+        log.info("NO_TRADE", "No signals generated in this scan")
         return ranking
+    
+    avg_score = sum(s.total for s in ranking.top) / len(ranking.top) if ranking.top else 0
+    log.info("NO_TRADE", f"Signals found: avg_score={avg_score:.1f}, count={len(ranking.top)}")
 
     summary = format_ranking_summary(ranking)
     for line in summary.splitlines():

@@ -598,14 +598,14 @@ class JarvisChatbot:
         return "\n".join(status_lines)
 
     async def _cmd_sinais(self, chat_id: str, args: str) -> str:
+        from websocket_client import ws_state as _ws_state
         ranking = self._system_refs.get("last_ranking")
         
         if not ranking or not ranking.top:
-            quality = get_current_quality()
-            ws_status = "✅ Conectado" if quality.ws_connected else "❌ Desconectado"
+            ws_status = "✅ Conectado" if _ws_state.get("status") == "CONNECTED" else "❌ Desconectado"
             return (
                 "📭 *Nenhum sinal agora*\n\n"
-                "O sistema monitora 24/7, mas nem sempre há oportunidades claras.\n\n"
+                "O sistema monitora 24/7, mas nem sempre há oportunidades claras.\n"
                 f"Status WebSocket: {ws_status}\n"
                 "• Tente /scan para forçar uma análise\n"
                 "• Use /status para ver o estado do sistema\n"

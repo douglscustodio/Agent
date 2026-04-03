@@ -153,7 +153,7 @@ async def job_scan_cycle() -> None:
         status = ctx.kill_switch.get_status()
         log.critical("KILL_SWITCH", f"Trading blocked: {status.reason}")
         if _chatbot and _chatbot._alert_chat_id:
-            await _chatbot.send_alert(f"🛑 *KILL SWITCH ATIVO*\n\n{status.reason}\n\nTrades bloqueados até reset.")
+            await _chatbot.send_alert(f"[KILL] *KILL SWITCH ATIVO*\n\n{status.reason}\n\nTrades bloqueados até reset.")
         return
 
     live_weights = ctx.adaptive.get_weights()
@@ -464,22 +464,22 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _handle_signal, sig)
 
-    # ── 1. Database ──────────────────────────────────────────────────────
+    #  1. Database 
     try:
         await init_db()
     except RuntimeError as exc:
         log.critical("SYSTEM_START", f"DB startup failed: {exc}")
         return
 
-    # ── 2. Performance tracker ───────────────────────────────────────────
+    #  2. Performance tracker 
     await ctx.tracker.startup()
 
-    # ── 3. Adaptive engine ───────────────────────────────────────────────
+    #  3. Adaptive engine 
     await ctx.adaptive.startup()
     await ctx.memory.startup()
     await ctx.macro.refresh()
 
-    # ── 4. News engine (warm cache) ──────────────────────────────────────
+    #  4. News engine (warm cache) 
     try:
         ctx.latest_articles = await ctx.news_engine.fetch_all()
         ctx.last_news_ts    = _now_iso()
@@ -487,7 +487,7 @@ async def main() -> None:
     except Exception as exc:
         log.warning("NEWS_PRIMARY_FAIL", f"initial news fetch failed: {exc}")
 
-    # ── 5. Notifier ──────────────────────────────────────────────────────
+    #  5. Notifier 
     tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not tg_token:
@@ -499,13 +499,13 @@ async def main() -> None:
     await ctx.notifier.startup()
     ctx.notifier.set_news_engine(ctx.news_engine)
 
-    # ── 6. Health server ─────────────────────────────────────────────────
+    #  6. Health server 
     await run_health_server()
 
-    # ── 7. WebSocket client ──────────────────────────────────────────────
+    #  7. WebSocket client 
     ws_task = asyncio.create_task(run_websocket_client())
 
-    # ── 8. Scheduler ─────────────────────────────────────────────────────
+    #  8. Scheduler 
     sched = build_scheduler(
         scan_fn=        job_scan_cycle,
         news_fn=        job_news_fetch,
@@ -533,7 +533,7 @@ async def main() -> None:
     )
     log.info("SYSTEM_READY", "=== Crypto Monitor fully operational ===")
 
-    # ── 9. Chatbot (Telegram) ───────────────────────────────────────────
+    #  9. Chatbot (Telegram) 
     global _chatbot
     _chatbot = None
     if tg_token and tg_chat_id:
@@ -556,7 +556,7 @@ async def main() -> None:
         sent = await _chatbot._send_message(tg_chat_id, welcome)
         log.info("CHATBOT_INIT", f"welcome sent: {sent}")
 
-    # ── 10. Message handling loop ────────────────────────────────────────
+    #  10. Message handling loop 
     async def chat_loop():
         if not _chatbot:
             log.warning("CHATBOT_LOOP", "no chatbot configured")
@@ -585,7 +585,7 @@ async def main() -> None:
                 log.info("CHATBOT_MSG", f"user={user_chat_id} text='{text[:30]}...' non_text={non_text}")
                 
                 if non_text:
-                    response = "📎 Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver comandos."
+                    response = " Desculpe, só consigo ler mensagens de texto!\n\nDigite /help para ver comandos."
                 else:
                     from scanner import run_scan_cycle as _scan
                     ctx.latest_ranking = await _scan() if ctx.latest_ranking is None else ctx.latest_ranking
@@ -604,10 +604,10 @@ async def main() -> None:
 
     chat_task = asyncio.create_task(chat_loop()) if _chatbot else None
 
-    # ── 11. Run until signal ─────────────────────────────────────────────
+    #  11. Run until signal 
     await _shutdown_event.wait()
 
-    # ── 10. Graceful teardown ────────────────────────────────────────────
+    #  10. Graceful teardown 
     log.info("SYSTEM_START", "initiating graceful shutdown")
 
     ws_task.cancel()

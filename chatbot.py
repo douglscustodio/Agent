@@ -956,9 +956,9 @@ class JarvisChatbot:
         try:
             response = await self._call_groq(args, api_key)
             if response:
-                return f"🤖 *Resposta IA:*\n\n{response}\n\n_Resposta gerada por IA - use como referência, não como conselho financeiro_"
+                return f"🤖 *Análise IA*\n\n{response}\n\n_Use como referência_"
             else:
-                return "🤖 *IA indisponível no momento.* Tente novamente mais tarde."
+                return "🤖 *IA indisponível.* Tente novamente."
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"AI error: {exc}")
             return f"🤖 *Erro na IA:* {exc}"
@@ -971,30 +971,29 @@ class JarvisChatbot:
         context_parts = []
         
         if ranking and ranking.top:
-            signals = [f"{s.symbol}/USDT {s.direction} (score {s.score:.0f})" for s in ranking.top[:3]]
-            context_parts.append(f"SINAIS ATUAIS: {', '.join(signals)}")
+            signals = [f"{s.symbol} {s.direction} ({s.score:.0f})" for s in ranking.top[:3]]
+            context_parts.append(f"SINAIS: {', '.join(signals)}")
         
         if news_engine and hasattr(news_engine, "_cache") and news_engine._cache:
-            top_news = news_engine._cache[0].title[:100]
+            top_news = news_engine._cache[0].title[:80]
             translated_news = _translate_news_title(top_news)
-            context_parts.append(f"ÚLTIMA NOTÍCIA: {translated_news}")
+            context_parts.append(f"NOTÍCIA: {translated_news}")
         
         if macro_engine:
             snap = macro_engine.get_snapshot()
             if snap:
-                context_parts.append(f"MACRO: risco={snap.risk_score} bias={snap.crypto_bias}")
+                context_parts.append(f"MACRO: {snap.risk_label} | {snap.crypto_bias}")
         
-        context = "\n".join(context_parts) if context_parts else "Sistema sem dados disponíveis no momento."
+        context = "\n".join(context_parts) if context_parts else ""
         
-        prompt = f"""Você é o assistente de trading do Jarvis AI Monitor. Responda em português brasileiro, de forma clara e útil.
+        prompt = f"""Você é um analyst de crypto conciso. Responda em PT-BR, no máximo 2-3 frases CURTAS e diretas. Use emojis quando relevante.
 
-CONTEXTO DO SISTEMA:
-{context}
+{"Contexto: " + context if context else ""}
 
-PERGUNTA DO USUÁRIO:
-{question}
+Pergunta: {question}
 
-Responda de forma concisa (máximo 3-4 frases), focada e útil. Se não souber algo, diga claramente. Nunca dê sinais de compra/venda explícitos."""
+Formato: [Emoji] Frase curta. [Emoji] Frase curta.
+Exemplo: 📊 BTC sustentando suporte em 67k. ⚠️ Mas macro ainda incerto."""
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -1002,7 +1001,7 @@ Responda de forma concisa (máximo 3-4 frases), focada e útil. Se não souber a
         }
         body = {
             "model": AI_MODEL,
-            "max_tokens": AI_MAX_TOKENS,
+            "max_tokens": 150,
             "temperature": 0.5,
             "messages": [{"role": "user", "content": prompt}],
         }

@@ -522,22 +522,37 @@ class JarvisChatbot:
             return f"🔗 *Conteúdo:*\n\n{content[:1000]}...\n\n(Erro na análise: {exc})"
 
     async def _cmd_start(self, chat_id: str, args: str) -> str:
-        quality = get_current_quality()
+        log.info("CHATBOT_START", f"start command from {chat_id}")
         
-        welcome = (
-            "🤖 *Jarvis AI Trading Monitor*\n\n"
-            "Olá! Sou seu assistente de trading pessoal.\n\n"
-            "🎯 *O que eu faço:*\n"
-            "• Procuro oportunidades de compra/venda automaticamente\n"
-            "• Analiso notícias e contexto macro\n"
-            "• Valido sinais com inteligência artificial\n"
-            "• Monitorei o mercado 24/7\n\n"
-            "⚡ *Comece agora:*\n"
-            "1. Digite /sinais para ver oportunidades\n"
-            "2. Use /ai + sua pergunta para conversar\n"
-            "3. /help para ver todos os comandos\n\n"
-            f"📊 Status: {quality.quality_label}\n\n"
-            "_Jarvis AI Trading Monitor_"
+        # Verificar configuração básica
+        import os
+        checks = []
+        if os.getenv("GROQ_API_KEY"):
+            checks.append("✅ GROQ_API_KEY configurada")
+        else:
+            checks.append("⚠️ GROQ_API_KEY não configurada")
+        
+        if os.getenv("TELEGRAM_BOT_TOKEN"):
+            checks.append("✅ Telegram configurado")
+        else:
+            checks.append("⚠️ Telegram não configurado")
+        
+        return (
+            "👋 *Bem-vindo ao Jarvis AI Trading Monitor!*\n\n"
+            "Sou seu assistente pessoal de trading de criptomoedas.\n"
+            "Estou monitorando o mercado 24/7 e te alertando sobre oportunidades.\n\n"
+            "*Configuração:*\n" + "\n".join(checks) + "\n\n"
+            "*O que posso fazer:*\n"
+            "📊 Analisar o mercado e identificar sinais de trade\n"
+            "📰 Buscar as últimas notícias relevantes\n"
+            "🌍 Acompanhar o contexto macroeconômico\n"
+            "🛡️ Gerenciar riscos da sua carteira\n"
+            "🤖 Responder suas perguntas sobre crypto\n\n"
+            "*Comece com:*\n"
+            "/debug — Diagnosticar o sistema\n"
+            "/status — Ver como o sistema está\n"
+            "/sinais — Ver oportunidades de trade\n"
+            "/help — Ver todos os comandos"
         )
         return welcome
 
@@ -825,7 +840,7 @@ class JarvisChatbot:
         """Mostra diagnóstico detalhado do sistema."""
         from data_quality import get_current_quality
         from websocket_client import ws_state
-        from kill_switch import kill_switch
+        from kill_switch import KillSwitch
         
         lines = [
             "🔍 *DIAGNÓSTICO DO SISTEMA*",
@@ -843,10 +858,13 @@ class JarvisChatbot:
         lines.append("")
         
         ws_status = ws_state.get("status", "UNKNOWN")
+        ws_last = ws_state.get("last_message_at", "nunca")
         lines.append("*🌐 WebSocket:*")
         lines.append(f"• Status: {ws_status}")
+        lines.append(f"• Último msg: {ws_last}")
         lines.append("")
         
+        kill_switch = KillSwitch()
         lines.append("*🛑 Kill Switch:*")
         lines.append(f"• Pode operar: {'✅ SIM' if kill_switch.can_trade() else '❌ NÃO'}")
         if not kill_switch.can_trade():
@@ -875,21 +893,26 @@ class JarvisChatbot:
         scan_fn = self._system_refs.get("scanner_module")
         
         if not scan_fn:
-            return "⚡ *Scan*\n\nScanner não disponível."
+            log.error("CHATBOT_SCAN", "scanner_module not in _system_refs")
+            return "⚡ *Scan*\n\nScanner não disponível.\n\nUse /debug para ver o que está bloqueando."
         
         try:
+            log.info("CHATBOT_SCAN", "Starting scan from chatbot command")
             ranking = await scan_fn()
+            log.info("CHATBOT_SCAN", f"Scan completed, signals: {len(ranking.top) if ranking and ranking.top else 0}")
             
             if ranking and ranking.top:
                 count = len(ranking.top)
-                top_sig = ranking.top[0]
-                emoji = "📈" if top_sig.direction == "LONG" else "📉"
-                return f"✅ *Scan Completo*\n\n{count} sinal(ais) encontrado(s):\n{emoji} {top_sig.symbol}/USDT ({top_sig.direction}) com score `{top_sig.score:.0f}`"
+                lines = [f"✅ *Scan Completo*\n\n{count} sinal(ais) encontrado(s):\n"]
+                for sig in ranking.top[:3]:
+                    emoji = "📈" if sig.direction == "LONG" else "📉"
+                    lines.append(f"{emoji} {sig.symbol}/USDT ({sig.direction}) — Score: `{sig.score:.0f}`")
+                return "\n".join(lines)
             else:
-                return "✅ *Scan Completo*\n\nNenhum sinal válido encontrado neste scan."
+                return "✅ *Scan Completo*\n\nNenhum sinal válido encontrado.\nMotivo: condições de mercado não favoráveis ou dados indisponíveis.\n\nUse /debug para diagnóstico."
         except Exception as exc:
             log.error("CHATBOT_ERROR", f"scan error: {exc}")
-            return f"⚡ *Scan*\n\nErro ao executar scan: {exc}"
+            return f"⚡ *Scan*\n\nErro ao executar scan: {exc}\n\nUse /debug para diagnóstico completo."
 
     async def _cmd_risk(self, chat_id: str, args: str) -> str:
         risk_manager = self._system_refs.get("risk_manager")

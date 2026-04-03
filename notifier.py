@@ -997,10 +997,9 @@ class Notifier:
         await send_daily_summary(self, tracker)
 
     # ------------------------------------------------------------------
-    # Alerta genérico de sistema
+    # Alerta genérico de sistema (apenas log, não envia Telegram)
     # ------------------------------------------------------------------
 
     async def send_system_alert(self, text: str) -> None:
-        if not self._token or not self._chat_id:
-            return
-        await _send_telegram(self._token, self._chat_id, text)
+        # Apenas loga - não envia para Telegram para evitar spam
+        log.info("SYSTEM_ALERT", text[:100])

@@ -89,7 +89,7 @@ def _build_prompt(data: dict) -> str:
     sector     = data.get("sector", "")
 
     direction_pt = "COMPRA (LONG)" if direction == "LONG" else "VENDA (SHORT)"
-    crowded_note = "\n⚠️ ATENÇÃO: Setup 'crowded trade' detectado" if crowded else ""
+    crowded_note = "\n[WARN] ATENÇÃO: Setup 'crowded trade' detectado" if crowded else ""
 
     return f"""Você é um analista sênior de crypto. Analise este setup e responda APENAS com JSON válido, sem texto adicional.
 

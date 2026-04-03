@@ -504,7 +504,6 @@ async def main() -> None:
     ctx.notifier = Notifier(telegram_token=tg_token, telegram_chat_id=tg_chat_id)
     await ctx.notifier.startup()
     ctx.notifier.set_news_engine(ctx.news_engine)
-    # Notificações online/offline removidas para reduzir spam
 
     # ── 6. Health server ─────────────────────────────────────────────────
     await run_health_server()
@@ -616,7 +615,6 @@ async def main() -> None:
 
     # ── 10. Graceful teardown ────────────────────────────────────────────
     log.info("SYSTEM_START", "initiating graceful shutdown")
-    # Notificação offline removida
 
     ws_task.cancel()
     try:

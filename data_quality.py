@@ -141,15 +141,15 @@ class DataQuality:
         """Label legível da qualidade."""
         q = self.quality_score
         if q >= 0.85:
-            return "EXCELENTE 🟢"
+            return "EXCELENTE [GREEN]"
         elif q >= 0.7:
-            return "BOM 🟡"
+            return "BOM [YELLOW]"
         elif q >= 0.5:
-            return "RAZOÁVEL 🟠"
+            return "RAZOÁVEL [ORANGE]"
         elif q >= 0.3:
-            return "FRACO 🔴"
+            return "FRACO [RED]"
         else:
-            return "INSUFICIENTE ❌"
+            return "INSUFICIENTE [FAIL]"
     
     @property
     def warnings(self) -> List[str]:
@@ -157,27 +157,27 @@ class DataQuality:
         warnings = []
         
         if not self.ws_connected:
-            warnings.append("⚠️ WebSocket desconectado - usando dados potencialmente desatualizados")
+            warnings.append("[WARN] WebSocket desconectado - usando dados potencialmente desatualizados")
         
         if self.news_age_minutes > STALE_THRESHOLD_MIN:
-            warnings.append(f"⚠️ Notícias com {self.news_age_minutes:.0f}min de idade - dados podem estar obsoletos")
+            warnings.append(f"[WARN] Notícias com {self.news_age_minutes:.0f}min de idade - dados podem estar obsoletos")
         
         if self.market_age_minutes > STALE_THRESHOLD_MIN:
-            warnings.append(f"⚠️ Dados de mercado com {self.market_age_minutes:.0f}min de idade")
+            warnings.append(f"[WARN] Dados de mercado com {self.market_age_minutes:.0f}min de idade")
         
         if self.symbols_requested > 0:
             coverage = self.symbols_with_data / self.symbols_requested * 100
             if coverage < 50:
-                warnings.append(f"⚠️ Apenas {coverage:.0f}% dos símbolos com dados")
+                warnings.append(f"[WARN] Apenas {coverage:.0f}% dos símbolos com dados")
         
         if not self.hyperliquid_available:
-            warnings.append("⚠️ Hyperliquid indisponível - verificando dados alternativos")
+            warnings.append("[WARN] Hyperliquid indisponível - verificando dados alternativos")
         
         if not self.ai_available:
-            warnings.append("⚠️ IA desabilitada - sinais sem validação de inteligência artificial")
+            warnings.append("[WARN] IA desabilitada - sinais sem validação de inteligência artificial")
         
         if self.errors:
-            warnings.append(f"⚠️ {len(self.errors)} erro(s) detectado(s): {self.errors[0]}")
+            warnings.append(f"[WARN] {len(self.errors)} erro(s) detectado(s): {self.errors[0]}")
         
         return warnings
     

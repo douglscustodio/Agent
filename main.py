@@ -147,13 +147,7 @@ async def job_scan_cycle() -> None:
 
     current_ws_status = ws_state.get("status", "DISCONNECTED")
     if current_ws_status != "CONNECTED":
-        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — skipping scan cycle")
-        return
-
-    quality = get_current_quality()
-    if quality.should_block_signals:
-        log.error("SCAN_SKIP", f"Data quality blocked: {quality.quality_label}")
-        return
+        log.warning("SCAN_SKIP", f"WS status={current_ws_status} — continuing with REST API data")
 
     if not ctx.kill_switch.can_trade():
         status = ctx.kill_switch.get_status()

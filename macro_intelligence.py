@@ -237,65 +237,65 @@ def _compute_risk(snap: MacroSnapshot) -> tuple:
     if snap.vix:
         if snap.vix.price > 30:
             score += 20; bearish_pts += 2
-            explanations.append(f"⚠️ VIX alto ({snap.vix.price:.1f}) — medo no mercado")
+            explanations.append(f"[WARN] VIX alto ({snap.vix.price:.1f}) — medo no mercado")
         elif snap.vix.price > 20:
             score += 10; bearish_pts += 1
-            explanations.append(f"⚠️ VIX elevado ({snap.vix.price:.1f}) — cautela recomendada")
+            explanations.append(f"[WARN] VIX elevado ({snap.vix.price:.1f}) — cautela recomendada")
         else:
             score -= 10; bullish_pts += 1
-            explanations.append(f"✅ VIX baixo ({snap.vix.price:.1f}) — mercado calmo")
+            explanations.append(f"[OK] VIX baixo ({snap.vix.price:.1f}) — mercado calmo")
 
     # DXY — dólar forte = ruim para crypto
     if snap.dxy:
         if snap.dxy.change_pct > 0.5:
             score += 15; bearish_pts += 2
-            explanations.append(f"⚠️ Dólar subindo ({snap.dxy.change_pct:+.1f}%) — pressão em crypto")
+            explanations.append(f"[WARN] Dólar subindo ({snap.dxy.change_pct:+.1f}%) — pressão em crypto")
         elif snap.dxy.change_pct < -0.5:
             score -= 15; bullish_pts += 2
-            explanations.append(f"✅ Dólar caindo ({snap.dxy.change_pct:+.1f}%) — favorável para crypto")
+            explanations.append(f"[OK] Dólar caindo ({snap.dxy.change_pct:+.1f}%) — favorável para crypto")
         else:
-            explanations.append(f"➖ Dólar (DXY) estável ({snap.dxy.change_pct:+.1f}%)")
+            explanations.append(f" Dólar (DXY) estável ({snap.dxy.change_pct:+.1f}%)")
 
     # S&P500 — correlação com crypto
     if snap.sp500:
         if snap.sp500.change_pct > 1.0:
             score -= 10; bullish_pts += 1
-            explanations.append(f"✅ S&P500 subindo ({snap.sp500.change_pct:+.1f}%) — risco on")
+            explanations.append(f"[OK] S&P500 subindo ({snap.sp500.change_pct:+.1f}%) — risco on")
         elif snap.sp500.change_pct < -1.0:
             score += 10; bearish_pts += 1
-            explanations.append(f"⚠️ S&P500 caindo ({snap.sp500.change_pct:+.1f}%) — risco off")
+            explanations.append(f"[WARN] S&P500 caindo ({snap.sp500.change_pct:+.1f}%) — risco off")
         else:
-            explanations.append(f"➖ S&P500 estável ({snap.sp500.change_pct:+.1f}%)")
+            explanations.append(f" S&P500 estável ({snap.sp500.change_pct:+.1f}%)")
 
     # BTC ETF flows
     if snap.btc_etf:
         if snap.btc_etf.change_pct > 1.0:
             score -= 10; bullish_pts += 2
-            explanations.append(f"✅ ETF BTC (IBIT) subindo {snap.btc_etf.change_pct:+.1f}% — entrada institucional")
+            explanations.append(f"[OK] ETF BTC (IBIT) subindo {snap.btc_etf.change_pct:+.1f}% — entrada institucional")
         elif snap.btc_etf.change_pct < -1.0:
             score += 10; bearish_pts += 1
-            explanations.append(f"⚠️ ETF BTC (IBIT) caindo {snap.btc_etf.change_pct:+.1f}%")
+            explanations.append(f"[WARN] ETF BTC (IBIT) caindo {snap.btc_etf.change_pct:+.1f}%")
 
     # High impact news events
     high_neg = [e for e in snap.events if e.impact == "HIGH" and e.sentiment == "negative"]
     high_pos = [e for e in snap.events if e.impact == "HIGH" and e.sentiment == "positive"]
     if high_neg:
         score += 15; bearish_pts += 2
-        explanations.append(f"🔴 Evento macro negativo: {_translate_event_title(high_neg[0].title)[:60]}")
+        explanations.append(f"[RED] Evento macro negativo: {_translate_event_title(high_neg[0].title)[:60]}")
     if high_pos:
         score -= 10; bullish_pts += 2
-        explanations.append(f"🟢 Evento macro positivo: {_translate_event_title(high_pos[0].title)[:60]}")
+        explanations.append(f"[GREEN] Evento macro positivo: {_translate_event_title(high_pos[0].title)[:60]}")
 
     # Clamp
     score = max(0, min(100, score))
 
     # Risk label
     if score >= 75:
-        label = "ALTO RISCO 🔴"
+        label = "ALTO RISCO [RED]"
     elif score >= 55:
-        label = "RISCO MODERADO 🟡"
+        label = "RISCO MODERADO [YELLOW]"
     else:
-        label = "BAIXO RISCO 🟢"
+        label = "BAIXO RISCO [GREEN]"
 
     # Crypto bias
     if bullish_pts > bearish_pts + 1:
@@ -388,17 +388,17 @@ class MacroEngine:
         """Format macro snapshot as Portuguese Telegram message."""
         snap = self._snapshot
         if not snap:
-            return "📊 *Dados macro ainda carregando...*"
+            return "[STAT] *Dados macro ainda carregando...*"
 
         now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
         lines   = [
-            "🌍 *CONTEXTO MACROECONÔMICO*",
+            "[WORLD] *CONTEXTO MACROECONÔMICO*",
             f"_{now_str}_",
             "",
             f"*Risco de mercado: {snap.risk_label}*",
-            f"*Viés para crypto: {'🟢 ALTISTA' if snap.crypto_bias == 'BULLISH' else ('🔴 BAIXISTA' if snap.crypto_bias == 'BEARISH' else '⚪ NEUTRO')}*",  # PT-BR
+            f"*Viés para crypto: {'[GREEN] ALTISTA' if snap.crypto_bias == 'BULLISH' else ('[RED] BAIXISTA' if snap.crypto_bias == 'BEARISH' else '[NEUTRAL] NEUTRO')}*",  # PT-BR
             "",
-            "*📈 Mercados tradicionais:*",
+            "*[UP] Mercados tradicionais:*",
         ]
 
         for attr, label in [
@@ -411,11 +411,11 @@ class MacroEngine:
         ]:
             md: Optional[MarketData] = getattr(snap, attr, None)
             if md:
-                arrow = "⬆️" if md.trend == "UP" else ("⬇️" if md.trend == "DOWN" else "➡️")
+                arrow = "" if md.trend == "UP" else ("" if md.trend == "DOWN" else "")
                 lines.append(f"• {label}: `{md.price:,.2f}` {arrow} ({md.change_pct:+.2f}%)")
 
         lines.append("")
-        lines.append("*🧠 O que isso significa para crypto:*")
+        lines.append("* O que isso significa para crypto:*")
         for exp in snap.explanation[:5]:
             lines.append(f"• {exp}")
 
@@ -423,13 +423,13 @@ class MacroEngine:
             high_events = [e for e in snap.events if e.impact == "HIGH"][:3]
             if high_events:
                 lines.append("")
-                lines.append("*📰 Eventos de alto impacto:*")
+                lines.append("*[NEWS] Eventos de alto impacto:*")
                 for e in high_events:
-                    emoji = "🔴" if e.sentiment == "negative" else ("🟢" if e.sentiment == "positive" else "⚪")
+                    emoji = "[RED]" if e.sentiment == "negative" else ("[GREEN]" if e.sentiment == "positive" else "[NEUTRAL]")
                     title_pt = _translate_event_title(e.title)
                     lines.append(f"• {emoji} {title_pt[:80]}")
 
         lines.append("")
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
         lines.append("_Jarvis AI Trading Monitor_")
         return "\n".join(lines)

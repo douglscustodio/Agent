@@ -216,35 +216,35 @@ class MemoryEngine:
         if pm and pm.confidence > 0.3:
             if pm.should_ignore:
                 insight.ignore_signal = True
-                insight.pattern_verdict = f"⚠️ Padrão similar falhou {pm.sl_count}x — taxa de acerto só {pm.win_rate:.0f}%"
+                insight.pattern_verdict = f"[WARN] Padrão similar falhou {pm.sl_count}x — taxa de acerto só {pm.win_rate:.0f}%"
                 insight.confidence_boost = -10
                 insight.explanation.append(insight.pattern_verdict)
             elif pm.win_rate > 65:
-                insight.pattern_verdict = f"✅ Padrão similar acertou {pm.tp1_count}x de {pm.total_signals} ({pm.win_rate:.0f}%)"
+                insight.pattern_verdict = f"[OK] Padrão similar acertou {pm.tp1_count}x de {pm.total_signals} ({pm.win_rate:.0f}%)"
                 insight.confidence_boost = min(pm.win_rate / 10 - 5, 8)
                 insight.explanation.append(insight.pattern_verdict)
             else:
-                insight.pattern_verdict = f"➖ Padrão com resultado misto ({pm.win_rate:.0f}% de acerto)"
+                insight.pattern_verdict = f" Padrão com resultado misto ({pm.win_rate:.0f}% de acerto)"
                 insight.explanation.append(insight.pattern_verdict)
 
         # Sector verdict
         if sm and sm.signals >= 3:
             if sm.hot:
-                insight.sector_verdict = f"🔥 Setor {sector} quente neste regime ({sm.win_rate:.0f}% acerto)"
+                insight.sector_verdict = f"[HOT] Setor {sector} quente neste regime ({sm.win_rate:.0f}% acerto)"
                 insight.confidence_boost += 5
                 insight.explanation.append(insight.sector_verdict)
             elif sm.win_rate < 35:
-                insight.sector_verdict = f"❄️ Setor {sector} frio neste regime ({sm.win_rate:.0f}% acerto)"
+                insight.sector_verdict = f" Setor {sector} frio neste regime ({sm.win_rate:.0f}% acerto)"
                 insight.confidence_boost -= 5
                 insight.explanation.append(insight.sector_verdict)
 
         # Macro risk adjustment
         if macro_risk > 75:
             insight.confidence_boost -= 8
-            insight.explanation.append("⚠️ Risco macro alto — sinal reduzido automaticamente")
+            insight.explanation.append("[WARN] Risco macro alto — sinal reduzido automaticamente")
         elif macro_risk < 35:
             insight.confidence_boost += 3
-            insight.explanation.append("✅ Ambiente macro favorável")
+            insight.explanation.append("[OK] Ambiente macro favorável")
 
         return insight
 

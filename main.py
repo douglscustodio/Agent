@@ -25,12 +25,9 @@ from adaptive import AdaptiveEngine
 from analyst import get_analyst
 from chatbot import JarvisChatbot
 from macro_intelligence import MacroEngine
-from memory_engine import MemoryEngine
 from btc_regime import RegimeResult
-from config import config
 from database import init_db, close_db, write_system_event, flush_event_buffer
 from data_quality import get_current_quality
-from health_server import run_health_server, app_state
 from logger import get_logger
 from news_engine import NewsEngine, NewsArticle, NewsContext
 from notifier import Notifier
@@ -41,7 +38,6 @@ from kill_switch import KillSwitch
 from proactive_agent import ProactiveAgent
 from scanner import run_scan_cycle, get_symbols
 from scheduler import build_scheduler
-from sector_rotation import compute_sector_rotation
 from websocket_client import run_websocket_client, ws_state
 
 log = get_logger("main")
@@ -61,7 +57,6 @@ class AppContext:
         self.tracker:              PerformanceTracker   = PerformanceTracker()
         self.adaptive:             AdaptiveEngine       = AdaptiveEngine()
         self.macro:                MacroEngine          = MacroEngine()
-        self.memory:               MemoryEngine         = MemoryEngine()
         self.risk_manager:          PortfolioRiskManager = PortfolioRiskManager()
         self.kill_switch:           KillSwitch          = KillSwitch()
         self.proactive_agent:       Optional[ProactiveAgent] = ProactiveAgent()
@@ -137,7 +132,6 @@ async def job_news_fetch() -> None:
     if results[1] and isinstance(results[1], Exception):
         log.warning("MACRO_REFRESH_FAIL", f"macro refresh failed: {results[1]}")
     ctx.last_news_ts = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_news_ts
     log.timed("NEWS_FETCH_COMPLETE", f"news+macro parallel: {len(ctx.latest_articles)} articles", t0)
 
 
@@ -185,27 +179,8 @@ async def job_scan_cycle() -> None:
         return
     ctx.latest_ranking       = ranking
     ctx.last_scan_ts         = _now_iso()
-    app_state["last_scan_timestamp"] = ctx.last_scan_ts
 
-    # Build news context map for top signals
-    news_map: Dict[str, Optional[NewsContext]] = {}
-    for sig in ranking.top:
-        news_map[sig.symbol] = ctx.news_engine.get_context_for_symbol(
-            sig.symbol, ctx.latest_articles
-        )
-
-    # Sector rotation (for logging/reporting only — heat already applied in scanner)
-    if ranking.top:
-        symbol_scores = {s.symbol: s.score for s in ranking.top}
-        symbol_news   = {s.symbol: (news_map.get(s.symbol) or _empty_news(s.symbol)).impact_score
-                         for s in ranking.top}
-        sector_result = compute_sector_rotation(symbol_scores, symbol_news)
-        log.info(
-            "SCAN_SECTOR_ROTATION",
-            f"sector rotation: hot={sector_result.hot_sectors} cold={sector_result.cold_sectors[:2]}",
-        )
-
-    # Get macro snapshot and memory insights
+    # Get macro snapshot
     macro_snap = ctx.macro.get_snapshot()
 
     # PORTFOLIO RISK: Filter signals through risk manager
@@ -224,7 +199,7 @@ async def job_scan_cycle() -> None:
         return
 
     # Dispatch alerts
-    await ctx.notifier.dispatch(ranking, news_map, macro_snap=macro_snap, memory=ctx.memory)
+    await ctx.notifier.dispatch(ranking, {}, macro_snap=macro_snap)
 
     # PROATIVO: Enviar alertas via chatbot se tiver sinais
     if ranking.top and _chatbot:
@@ -458,7 +433,6 @@ async def main() -> None:
     ai_key = bool(os.getenv("GROQ_API_KEY"))
     ai_status = "habilitada" if ai_key else "desabilitada — configure GROQ_API_KEY"
     log.info("SYSTEM_START", f"IA Groq: {ai_status}")
-    app_state["started_at"] = _now_iso()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -476,7 +450,6 @@ async def main() -> None:
 
     # ── 3. Adaptive engine ───────────────────────────────────────────────
     await ctx.adaptive.startup()
-    await ctx.memory.startup()
     await ctx.macro.refresh()
 
     # ── 4. News engine (warm cache) ──────────────────────────────────────
@@ -499,10 +472,7 @@ async def main() -> None:
     await ctx.notifier.startup()
     ctx.notifier.set_news_engine(ctx.news_engine)
 
-    # ── 6. Health server ─────────────────────────────────────────────────
-    await run_health_server()
-
-    # ── 7. WebSocket client ──────────────────────────────────────────────
+    # ── 6. WebSocket client ──────────────────────────────────────────────
     ws_task = asyncio.create_task(run_websocket_client())
 
     # ── 8. Scheduler ─────────────────────────────────────────────────────
